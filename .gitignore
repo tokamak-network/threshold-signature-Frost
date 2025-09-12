@@ -1,0 +1,46 @@
+/target
+**/target
+**/.DS_Store
+/.idea
+/out
+*.log
+
+# === Rust workspace ===
+/target
+**/target
+
+# === OS / Editors ===
+**/.DS_Store
+/.idea/
+.vscode/
+
+# === Offchain run artifacts (generated) ===
+/out/
+run*/
+**/participants.txt
+**/share_*.json       # contains secret shares – never commit
+**/round1_*.json
+**/round2_*.json
+**/signature.json
+**/group.json         # generated; safe but not needed in VCS
+
+# === Node/Hardhat (onchain) ===
+**/node_modules/
+**/artifacts/
+**/cache/
+**/coverage/
+**/typechain/
+**/typechain-types/
+**/.openzeppelin/
+
+# Env files for scripts/onchain
+**/.env
+**/.env.*
+
+# === Logs & misc ===
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo

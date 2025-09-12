@@ -1,0 +1,15 @@
+[package]
+name = "offchain-verify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frost-core = { workspace = true }
+frost-secp256k1 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+k256 = { workspace = true }

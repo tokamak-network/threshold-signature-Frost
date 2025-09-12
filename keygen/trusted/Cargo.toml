@@ -1,0 +1,16 @@
+[package]
+name = "keygen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frost-core = { workspace = true }
+frost-secp256k1 = { workspace = true }
+k256 = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
