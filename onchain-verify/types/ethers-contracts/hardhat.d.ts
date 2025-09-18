@@ -10,13 +10,21 @@ import * as Contracts from "./index.js";
 
 declare module "@nomicfoundation/hardhat-ethers/types" {
   interface HardhatEthersHelpers extends HardhatEthersHelpersBase {
-  getContractFactory(name: 'ZecFrost', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.ZecFrost__factory>
+  getContractFactory(name: 'AppManager', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.AppManager__factory>
+getContractFactory(name: 'IZecFrost', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.IZecFrost__factory>
+getContractFactory(name: 'ZecFrost', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.ZecFrost__factory>
 
-  getContractAt(name: 'ZecFrost', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.ZecFrost>
+  getContractAt(name: 'AppManager', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.AppManager>
+getContractAt(name: 'IZecFrost', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.IZecFrost>
+getContractAt(name: 'ZecFrost', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.ZecFrost>
 
-  deployContract(name: 'ZecFrost', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.ZecFrost>
+  deployContract(name: 'AppManager', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.AppManager>
+deployContract(name: 'IZecFrost', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.IZecFrost>
+deployContract(name: 'ZecFrost', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.ZecFrost>
 
-  deployContract(name: 'ZecFrost', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.ZecFrost>
+  deployContract(name: 'AppManager', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.AppManager>
+deployContract(name: 'IZecFrost', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.IZecFrost>
+deployContract(name: 'ZecFrost', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.ZecFrost>
 
     // default types
     getContractFactory(
