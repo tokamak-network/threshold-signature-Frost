@@ -1,24 +1,51 @@
+/*!
+signing — per-participant FROST(secp256k1) signing tool
+-------------------------------------------------------
+This binary implements the three-step workflow to produce and verify a FROST signature:
+
+• Round 1 (per participant): generate ephemeral nonces + commitments from your share.
+• Round 2 (per participant): use all participants' Round1 outputs + your share to compute
+  a signature share over a message (Keccak-256 hashed).
+• Aggregate (single run): combine all Round1 + Round2 outputs to obtain the final signature.
+
+File formats are JSON wrappers around bincode-serialized FROST types, hex-encoded for
+portability. The outputs are compatible with the on-chain verifier and off-chain tools.
+*/
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::env;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use frost_core::Field;
 use frost_secp256k1 as frost;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::ecdsa::{
+    signature::{DigestSigner, DigestVerifier},
+    Signature as EcdsaSignature,
+    SigningKey as EcdsaSigningKey,
+    VerifyingKey as EcdsaVerifyingKey,
+};
 use k256::PublicKey;
+use k256::FieldBytes;
+use k256::Scalar;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
+/// Command-line interface for the signing tool.
 #[derive(Parser, Debug)]
-#[command(name = "signing", about = "Run FROST(secp256k1) signing stages (per-participant)")]
+#[command(
+    name = "signing",
+    about = "Run FROST(secp256k1) signing stages (per-participant)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
+/// Subcommands covering each stage of the FROST signing flow.
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Round 1 (per participant): generate nonces & commitments for ONE signer.
@@ -46,6 +73,11 @@ enum Commands {
         /// Output JSON path for round2. If omitted, defaults to <round1_dir>/round2_<id>.json
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Optional map of long‑term ECDSA public keys for authentication: "id_hex:pub1,id_hex:pub2,...".
+        /// Each id_hex is the *bincode-hex* of the signer id (as in share_*.json). If omitted,
+        /// signatures are still checked against the embedded pubkey, but not bound to an external map.
+        #[arg(long)]
+        participants_pubs: Option<String>,
     },
     /// Aggregate: build final signature from a directory of per-participant round1 files
     /// and a directory of per-participant round2 files.
@@ -62,9 +94,13 @@ enum Commands {
         /// Output signature JSON
         #[arg(long, default_value = "out/signature.json")]
         out: PathBuf,
+        /// Optional map of long‑term ECDSA public keys for authentication: "id_hex:pub1,id_hex:pub2,...".
+        #[arg(long)]
+        participants_pubs: Option<String>,
     },
 }
 
+/// Participant share file written by keygen/DKG. All bincode blobs are hex-encoded.
 #[derive(Serialize, Deserialize, Clone)]
 struct ShareFile {
     group_id: String,
@@ -76,14 +112,23 @@ struct ShareFile {
     group_vk_sec1_hex: String,
 }
 
+/// Output file produced by `Round1` for a single participant.
 #[derive(Serialize, Deserialize, Clone)]
 struct Round1One {
     group_id: String,
     signer_id_bincode_hex: String,
     nonces_bincode_hex: String,
     commitments_bincode_hex: String,
+    /// Optional ECDSA(sec1) pubkey hex for source authentication (compressed 33-byte SEC1)
+    #[serde(default)]
+    ecdsa_pub_sec1_hex: Option<String>,
+    /// Optional compact ECDSA signature (64-byte r||s hex) over Keccak256(payload)
+    /// where payload = "signing:R1|group_id|signer_id_bincode_hex|nonces_bincode_hex|commitments_bincode_hex"
+    #[serde(default)]
+    ecdsa_sig_keccak_hex: Option<String>,
 }
 
+/// Output file produced by `Round2` for a single participant.
 #[derive(Serialize, Deserialize, Clone)]
 struct Round2One {
     group_id: String,
@@ -91,8 +136,16 @@ struct Round2One {
     signature_share_bincode_hex: String,
     msg_plain_hex: String,
     msg_keccak32_hex: String,
+    /// Optional ECDSA(sec1) pubkey hex for source authentication (compressed 33-byte SEC1)
+    #[serde(default)]
+    ecdsa_pub_sec1_hex: Option<String>,
+    /// Optional compact ECDSA signature (64-byte r||s hex) over Keccak256(payload)
+    /// where payload = "signing:R2|group_id|signer_id_bincode_hex|signature_share_bincode_hex|msg_keccak32_hex"
+    #[serde(default)]
+    ecdsa_sig_keccak_hex: Option<String>,
 }
 
+/// Minimal group metadata (verifying key and thresholds) used by `Aggregate`.
 #[derive(Serialize, Deserialize)]
 struct GroupFile {
     group_id: String,
@@ -101,6 +154,7 @@ struct GroupFile {
     group_vk_sec1_hex: String,
 }
 
+/// Final signature object written by `Aggregate`, including human-friendly fields.
 #[derive(Serialize, Deserialize)]
 struct SignatureOut {
     group_id: String,
@@ -114,22 +168,103 @@ struct SignatureOut {
     message: String,
 }
 
+/// Read a JSON file and deserialize into `T`, attaching file path to any error.
 fn read_json<P: AsRef<Path>, T: for<'de> serde::Deserialize<'de>>(path: P) -> Result<T> {
     let s = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&s).with_context(|| format!("parsing JSON {}", path.as_ref().display()))?)
+    Ok(serde_json::from_str(&s)
+        .with_context(|| format!("parsing JSON {}", path.as_ref().display()))?)
 }
 
+/// Serialize `value` as pretty JSON to `path`, creating parent directories if needed.
 fn write_json<P: AsRef<Path>, T: serde::Serialize>(path: P, value: &T) -> Result<()> {
-    if let Some(parent) = path.as_ref().parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.as_ref().parent() {
+        fs::create_dir_all(parent)?;
+    }
     let s = serde_json::to_string_pretty(value)?;
     fs::write(path, s)?;
     Ok(())
 }
 
-fn parse_message_to_bytes(msg: &str) -> Result<Vec<u8>> {
-    if let Some(stripped) = msg.strip_prefix("0x") { Ok(hex::decode(stripped)?) } else { Ok(msg.as_bytes().to_vec()) }
+/// Read an ECDSA signing key from env. Checks SIGNING_ECDSA_PRIV_HEX then DKG_ECDSA_PRIV_HEX.
+/// Returns (SigningKey, compressed SEC1 pub hex) if present, otherwise Ok(None).
+fn read_ecdsa_signing_key_from_env() -> Result<Option<(EcdsaSigningKey, String)>> {
+    {
+        let sk_hex = env::var("SIGNING_ECDSA_PRIV_HEX")
+            .ok()
+            .or_else(|| env::var("DKG_ECDSA_PRIV_HEX").ok());
+        let Some(sk_hex) = sk_hex else { return Ok(None); };
+        let bytes = hex::decode(sk_hex.trim())?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("ECDSA priv must be 32 bytes (hex)"));
+        }
+        // Build a concrete FieldBytes (32 bytes) and create an ECDSA SigningKey.
+        let fb = FieldBytes::from_slice(&bytes);
+        let sk = EcdsaSigningKey::from_bytes(&fb)
+            .map_err(|_| anyhow!("invalid ECDSA private key bytes"))?;
+        let vk = EcdsaVerifyingKey::from(&sk);
+        let pub_hex = hex::encode(vk.to_encoded_point(true).as_bytes());
+        Ok(Some((sk, pub_hex)))
+    }
 }
 
+/// Build the Round1 authentication payload from its fields (excluding auth fields).
+fn auth_payload_round1(group_id: &str, id_hex: &str, nonces_hex: &str, commits_hex: &str) -> Vec<u8> {
+    format!("signing:R1|{}|{}|{}|{}", group_id, id_hex, nonces_hex, commits_hex).into_bytes()
+}
+
+/// Build the Round2 authentication payload from its fields (excluding auth fields).
+fn auth_payload_round2(group_id: &str, id_hex: &str, sigshare_hex: &str, msg32_hex: &str) -> Vec<u8> {
+    format!("signing:R2|{}|{}|{}|{}", group_id, id_hex, sigshare_hex, msg32_hex).into_bytes()
+}
+
+/// Verify a compact ECDSA signature (r||s) over Keccak256(payload) against a compressed SEC1 pub hex.
+fn verify_ecdsa_keccak(payload: &[u8], pub_sec1_hex: &str, sig_hex: &str) -> Result<()> {
+    let pub_bytes = hex::decode(pub_sec1_hex)?;
+    let vk = EcdsaVerifyingKey::from_sec1_bytes(&pub_bytes)
+        .map_err(|e| anyhow!("bad ECDSA pub: {e}"))?;
+    let sig_bytes = hex::decode(sig_hex)?;
+    let sig = EcdsaSignature::from_slice(&sig_bytes)
+        .map_err(|_| anyhow!("bad ECDSA signature bytes"))?;
+    let hasher = Keccak256::new().chain_update(payload);
+    vk.verify_digest(hasher, &sig)
+        .map_err(|_| anyhow!("ECDSA signature verification failed"))
+}
+
+/// Parse a participants pub map string `id:pub,id:pub,...`. `id` may be the exact
+/// bincode-hex signer id or a small decimal (1..n), which will be converted to bincode-hex.
+fn parse_participants_pubs_map(s: &str) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    if s.trim().is_empty() { return Ok(out); }
+    for pair in s.split(',') {
+        let (id_raw, pub_hex) = pair.split_once(':')
+            .ok_or_else(|| anyhow!("invalid participants-pubs entry (missing colon): {pair}"))?;
+        let id_key = if id_raw.chars().all(|c| c.is_ascii_hexdigit()) && id_raw.len() > 2 {
+            id_raw.to_string()
+        } else {
+            // try parse as integer index
+            let idx: u16 = id_raw.trim().parse()
+                .map_err(|_| anyhow!("invalid id '{id_raw}', expected hex or integer"))?;
+            let sc = Scalar::from(idx as u64);
+            let ident = frost::Identifier::new(sc).expect("invalid identifier index: {idx}");
+            hex::encode(bincode::serialize(&ident)?)
+        };
+        out.insert(id_key, pub_hex.to_string());
+    }
+    Ok(out)
+}
+
+/// Parse a message string: if it starts with `0x`, treat as hex; otherwise use ASCII bytes.
+fn parse_message_to_bytes(msg: &str) -> Result<Vec<u8>> {
+    if let Some(stripped) = msg.strip_prefix("0x") {
+        Ok(hex::decode(stripped)?)
+    } else {
+        Ok(msg.as_bytes().to_vec())
+    }
+}
+
+/// Populate `vmap` with verifying shares for the `needed_ids` by scanning `dir` for `share_*.json`.
+/// This is used during aggregation to reconstruct the `PublicKeyPackage` when only `group.json`
+/// and Round files are present.
 fn scan_dir_for_vshares(
     dir: &Path,
     needed_ids: &[frost::Identifier],
@@ -137,12 +272,26 @@ fn scan_dir_for_vshares(
 ) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-        if !p.file_name().and_then(|s| s.to_str()).map(|s| s.starts_with("share_")).unwrap_or(false) { continue; }
-        let sf_one: ShareFile = match read_json(&p) { Ok(v) => v, Err(_) => continue };
-        let id: frost::Identifier = bincode::deserialize(&hex::decode(&sf_one.signer_id_bincode_hex)?)?;
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if !p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.starts_with("share_"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let sf_one: ShareFile = match read_json(&p) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id: frost::Identifier =
+            bincode::deserialize(&hex::decode(&sf_one.signer_id_bincode_hex)?)?;
         if needed_ids.iter().any(|x| *x == id) && !vmap.contains_key(&id) {
-            let vshare: frost::keys::VerifyingShare = bincode::deserialize(&hex::decode(&sf_one.verifying_share_bincode_hex)?)?;
+            let vshare: frost::keys::VerifyingShare =
+                bincode::deserialize(&hex::decode(&sf_one.verifying_share_bincode_hex)?)?;
             vmap.insert(id, vshare);
         }
     }
@@ -155,146 +304,298 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Round1 { share, out } => {
             let sf: ShareFile = read_json(&share)?;
+            // Decode our secret share and identifier from the share file.
             let secret_share: frost::keys::SecretShare =
                 bincode::deserialize(&hex::decode(&sf.secret_share_bincode_hex)?)?;
             let id_hex = sf.signer_id_bincode_hex.clone();
             let _id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
 
+            // Build a KeyPackage to access our signing share (private scalar).
             let mut rng = OsRng;
             let key_package = frost::keys::KeyPackage::try_from(secret_share)?;
-            let (nonces, commitments) = frost::round1::commit(key_package.signing_share(), &mut rng);
+            // Generate ephemeral nonces and their public commitments for this signing session.
+            let (nonces, commitments) =
+                frost::round1::commit(key_package.signing_share(), &mut rng);
 
-            let r1 = Round1One {
-                group_id: sf.group_id,
+            // Persist Round1 output for THIS participant, with optional ECDSA authentication.
+            let nonces_hex = hex::encode(bincode::serialize(&nonces)?);
+            let commits_hex = hex::encode(bincode::serialize(&commitments)?);
+            let mut r1 = Round1One {
+                group_id: sf.group_id.clone(),
                 signer_id_bincode_hex: id_hex.clone(),
-                nonces_bincode_hex: hex::encode(bincode::serialize(&nonces)?),
-                commitments_bincode_hex: hex::encode(bincode::serialize(&commitments)?),
+                nonces_bincode_hex: nonces_hex.clone(),
+                commitments_bincode_hex: commits_hex.clone(),
+                ecdsa_pub_sec1_hex: None,
+                ecdsa_sig_keccak_hex: None,
             };
+            if let Some((sk, pub_hex)) = read_ecdsa_signing_key_from_env()? {
+                let payload = auth_payload_round1(&r1.group_id, &r1.signer_id_bincode_hex, &nonces_hex, &commits_hex);
+                let sig: EcdsaSignature = sk.sign_digest(Keccak256::new().chain_update(&payload));
+                r1.ecdsa_pub_sec1_hex = Some(pub_hex);
+                r1.ecdsa_sig_keccak_hex = Some(hex::encode(sig.to_bytes()));
+            }
             let base_dir = share.parent().unwrap_or_else(|| Path::new("out"));
-            let out_path = out.clone().unwrap_or_else(|| base_dir.join(format!("round1_{}.json", id_hex)));
+            let out_path = out
+                .clone()
+                .unwrap_or_else(|| base_dir.join(format!("round1_{}.json", id_hex)));
             write_json(&out_path, &r1)?;
             println!("Wrote {}", out_path.display());
         }
 
-        Commands::Round2 { share, round1_dir, message, out } => {
+        Commands::Round2 {
+            share,
+            round1_dir,
+            message,
+            out,
+            participants_pubs,
+        } => {
             let sf: ShareFile = read_json(&share)?;
+            // Identify ourselves and collect ALL participants' Round1 files.
             let my_id_hex = sf.signer_id_bincode_hex.clone();
             let _my_id: frost::Identifier = bincode::deserialize(&hex::decode(&my_id_hex)?)?;
 
-            // Load all round1 files to build full commitments map and to fetch *my* nonces
-            let mut commitments_map: BTreeMap<frost::Identifier, frost::round1::SigningCommitments> = BTreeMap::new();
+            // Build the commitments map {id -> SigningCommitments} and find OUR nonces.
+            let mut commitments_map: BTreeMap<
+                frost::Identifier,
+                frost::round1::SigningCommitments,
+            > = BTreeMap::new();
             let mut my_nonces: Option<frost::round1::SigningNonces> = None;
             for entry in fs::read_dir(&round1_dir)? {
                 let p = entry?.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-                let r1: Round1One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
-                let id: frost::Identifier = bincode::deserialize(&hex::decode(&r1.signer_id_bincode_hex)?)?;
+                if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let r1: Round1One = match read_json(&p) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let id: frost::Identifier =
+                    bincode::deserialize(&hex::decode(&r1.signer_id_bincode_hex)?)?;
                 let commitments: frost::round1::SigningCommitments =
                     bincode::deserialize(&hex::decode(&r1.commitments_bincode_hex)?)?;
                 commitments_map.insert(id, commitments);
                 if r1.signer_id_bincode_hex == my_id_hex {
-                    let n: frost::round1::SigningNonces = bincode::deserialize(&hex::decode(&r1.nonces_bincode_hex)?)?;
+                    let n: frost::round1::SigningNonces =
+                        bincode::deserialize(&hex::decode(&r1.nonces_bincode_hex)?)?;
                     my_nonces = Some(n);
                 }
             }
-            let my_nonces = my_nonces.ok_or_else(|| anyhow!("could not find round1 for this participant in {}", round1_dir.display()))?;
-
-            // Optional sanity: ensure we have at least threshold participants
-            if commitments_map.len() < sf.threshold as usize {
-                return Err(anyhow!(
-                    "not enough commitments: have {}, need at least {}",
-                    commitments_map.len(), sf.threshold
-                ));
-            }
-
-            // Build message
-            let msg_bytes = parse_message_to_bytes(&message)?;
-            let msg32 = Keccak256::digest(&msg_bytes);
-
-            // Build signing package from ALL commitments
-            let signing_package = frost::SigningPackage::new(commitments_map, msg32.as_slice());
-
-            // Rebuild this participant's key package
-            let secret_share: frost::keys::SecretShare =
-                bincode::deserialize(&hex::decode(&sf.secret_share_bincode_hex)?)?;
-            let key_package = frost::keys::KeyPackage::try_from(secret_share)?;
-
-            // Compute signature share
-            let sig_share = frost::round2::sign(&signing_package, &my_nonces, &key_package)?;
-
-            let r2 = Round2One {
-                group_id: sf.group_id,
-                signer_id_bincode_hex: my_id_hex.clone(),
-                signature_share_bincode_hex: hex::encode(bincode::serialize(&sig_share)?),
-                msg_plain_hex: format!("0x{}", hex::encode(&msg_bytes)),
-                msg_keccak32_hex: format!("0x{}", hex::encode(msg32)),
+            // Optional authentication: verify ECDSA signatures on Round1 files.
+            let auth_map = if let Some(s) = participants_pubs.as_ref() {
+                parse_participants_pubs_map(s)?
+            } else {
+                BTreeMap::new()
             };
-            let base_dir = &round1_dir;
-            let out_path = out.clone().unwrap_or_else(|| base_dir.join(format!("round2_{}.json", my_id_hex)));
-            write_json(&out_path, &r2)?;
-            println!("Wrote {}", out_path.display());
-        }
-
-        Commands::Aggregate { group, round1_dir, round2_dir, out } => {
-            let g: GroupFile = read_json(&group)?;
-
-            // Load all per-participant round1 files (commitments)
-            let mut commitments_map: BTreeMap<frost::Identifier, frost::round1::SigningCommitments> = BTreeMap::new();
             for entry in fs::read_dir(&round1_dir)? {
                 let p = entry?.path();
                 if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
                 let r1: Round1One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
-                let id: frost::Identifier = bincode::deserialize(&hex::decode(&r1.signer_id_bincode_hex)?)?;
+                if let (Some(pub_hex), Some(sig_hex)) = (&r1.ecdsa_pub_sec1_hex, &r1.ecdsa_sig_keccak_hex) {
+                    // If an external map is provided, ensure the pub matches the expected for this id.
+                    if let Some(expected_pub) = auth_map.get(&r1.signer_id_bincode_hex) {
+                        if expected_pub.trim().to_lowercase() != pub_hex.trim().to_lowercase() {
+                            return Err(anyhow!("Round1 pub mismatch for id {}", r1.signer_id_bincode_hex));
+                        }
+                    }
+                    let payload = auth_payload_round1(&r1.group_id, &r1.signer_id_bincode_hex, &r1.nonces_bincode_hex, &r1.commitments_bincode_hex);
+                    verify_ecdsa_keccak(&payload, pub_hex, sig_hex)?;
+                }
+            }
+            let my_nonces = my_nonces.ok_or_else(|| {
+                anyhow!(
+                    "could not find round1 for this participant in {}",
+                    round1_dir.display()
+                )
+            })?;
+
+            // Sanity check: ensure at least `t` participants are present.
+            if commitments_map.len() < sf.threshold as usize {
+                return Err(anyhow!(
+                    "not enough commitments: have {}, need at least {}",
+                    commitments_map.len(),
+                    sf.threshold
+                ));
+            }
+
+            // Build the message digest: Keccak-256(message-bytes).
+            let msg_bytes = parse_message_to_bytes(&message)?;
+            let msg32 = Keccak256::digest(&msg_bytes);
+
+            // Bundle (commitments, message) for Round2 signing.
+            let signing_package = frost::SigningPackage::new(commitments_map, msg32.as_slice());
+
+            // Rebuild our KeyPackage from the secret share in the share file.
+            let secret_share: frost::keys::SecretShare =
+                bincode::deserialize(&hex::decode(&sf.secret_share_bincode_hex)?)?;
+            let key_package = frost::keys::KeyPackage::try_from(secret_share)?;
+
+            // Compute OUR signature share.
+            let sig_share = frost::round2::sign(&signing_package, &my_nonces, &key_package)?;
+
+            // Persist Round2 output for THIS participant, with optional ECDSA authentication.
+            let sigshare_hex = hex::encode(bincode::serialize(&sig_share)?);
+            let msg32_hex = format!("0x{}", hex::encode(msg32));
+            let mut r2 = Round2One {
+                group_id: sf.group_id.clone(),
+                signer_id_bincode_hex: my_id_hex.clone(),
+                signature_share_bincode_hex: sigshare_hex.clone(),
+                msg_plain_hex: format!("0x{}", hex::encode(&msg_bytes)),
+                msg_keccak32_hex: msg32_hex.clone(),
+                ecdsa_pub_sec1_hex: None,
+                ecdsa_sig_keccak_hex: None,
+            };
+            if let Some((sk, pub_hex)) = read_ecdsa_signing_key_from_env()? {
+                let payload = auth_payload_round2(&r2.group_id, &r2.signer_id_bincode_hex, &sigshare_hex, &msg32_hex);
+                let sig: EcdsaSignature = sk.sign_digest(Keccak256::new().chain_update(&payload));
+                r2.ecdsa_pub_sec1_hex = Some(pub_hex);
+                r2.ecdsa_sig_keccak_hex = Some(hex::encode(sig.to_bytes()));
+            }
+            let base_dir = &round1_dir;
+            let out_path = out
+                .clone()
+                .unwrap_or_else(|| base_dir.join(format!("round2_{}.json", my_id_hex)));
+            write_json(&out_path, &r2)?;
+            println!("Wrote {}", out_path.display());
+        }
+
+        Commands::Aggregate {
+            group,
+            round1_dir,
+            round2_dir,
+            out,
+            participants_pubs,
+        } => {
+            let g: GroupFile = read_json(&group)?;
+            // 1) Collect all Round1 commitments.
+            // Build commitments_map {id -> SigningCommitments} from round1_*.json
+            let mut commitments_map: BTreeMap<
+                frost::Identifier,
+                frost::round1::SigningCommitments,
+            > = BTreeMap::new();
+            for entry in fs::read_dir(&round1_dir)? {
+                let p = entry?.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let r1: Round1One = match read_json(&p) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let id: frost::Identifier =
+                    bincode::deserialize(&hex::decode(&r1.signer_id_bincode_hex)?)?;
                 let commitments: frost::round1::SigningCommitments =
                     bincode::deserialize(&hex::decode(&r1.commitments_bincode_hex)?)?;
                 commitments_map.insert(id, commitments);
             }
+            // Optional authentication: verify ECDSA signatures on Round1 files.
+            let auth_map = if let Some(s) = participants_pubs.as_ref() {
+                parse_participants_pubs_map(s)?
+            } else {
+                BTreeMap::new()
+            };
+            for entry in fs::read_dir(&round1_dir)? {
+                let p = entry?.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+                let r1: Round1One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
+                if let (Some(pub_hex), Some(sig_hex)) = (&r1.ecdsa_pub_sec1_hex, &r1.ecdsa_sig_keccak_hex) {
+                    if let Some(expected_pub) = auth_map.get(&r1.signer_id_bincode_hex) {
+                        if expected_pub.trim().to_lowercase() != pub_hex.trim().to_lowercase() {
+                            return Err(anyhow!("Round1 pub mismatch for id {}", r1.signer_id_bincode_hex));
+                        }
+                    }
+                    let payload = auth_payload_round1(&r1.group_id, &r1.signer_id_bincode_hex, &r1.nonces_bincode_hex, &r1.commitments_bincode_hex);
+                    verify_ecdsa_keccak(&payload, pub_hex, sig_hex)?;
+                }
+            }
             if commitments_map.is_empty() {
-                return Err(anyhow!("no round1_*.json files found in {}", round1_dir.display()));
+                return Err(anyhow!(
+                    "no round1_*.json files found in {}",
+                    round1_dir.display()
+                ));
             }
 
-            // Load all per-participant round2 files (signature shares) and check the message matches
-            let mut sig_shares: BTreeMap<frost::Identifier, frost::round2::SignatureShare> = BTreeMap::new();
+            // 2) Collect all Round2 signature shares and ensure all refer to the SAME message digest.
+            let mut sig_shares: BTreeMap<frost::Identifier, frost::round2::SignatureShare> =
+                BTreeMap::new();
             let mut msg_hex: Option<String> = None;
             for entry in fs::read_dir(&round2_dir)? {
                 let p = entry?.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-                let r2: Round2One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
+                if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let r2: Round2One = match read_json(&p) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 if let Some(prev) = &msg_hex {
-                    if *prev != r2.msg_keccak32_hex { return Err(anyhow!("mismatched msg_keccak32 across round2 files")); }
-                } else { msg_hex = Some(r2.msg_keccak32_hex.clone()); }
-                let id: frost::Identifier = bincode::deserialize(&hex::decode(&r2.signer_id_bincode_hex)?)?;
+                    if *prev != r2.msg_keccak32_hex {
+                        return Err(anyhow!("mismatched msg_keccak32 across round2 files"));
+                    }
+                } else {
+                    msg_hex = Some(r2.msg_keccak32_hex.clone());
+                }
+                let id: frost::Identifier =
+                    bincode::deserialize(&hex::decode(&r2.signer_id_bincode_hex)?)?;
                 let sshare: frost::round2::SignatureShare =
                     bincode::deserialize(&hex::decode(&r2.signature_share_bincode_hex)?)?;
                 sig_shares.insert(id, sshare);
             }
-            if sig_shares.is_empty() { return Err(anyhow!("no round2_*.json files found in {}", round2_dir.display())); }
+            // Optional authentication: verify ECDSA signatures on Round2 files.
+            for entry in fs::read_dir(&round2_dir)? {
+                let p = entry?.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+                let r2: Round2One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
+                if let (Some(pub_hex), Some(sig_hex)) = (&r2.ecdsa_pub_sec1_hex, &r2.ecdsa_sig_keccak_hex) {
+                    if let Some(expected_pub) = auth_map.get(&r2.signer_id_bincode_hex) {
+                        if expected_pub.trim().to_lowercase() != pub_hex.trim().to_lowercase() {
+                            return Err(anyhow!("Round2 pub mismatch for id {}", r2.signer_id_bincode_hex));
+                        }
+                    }
+                    let payload = auth_payload_round2(&r2.group_id, &r2.signer_id_bincode_hex, &r2.signature_share_bincode_hex, &r2.msg_keccak32_hex);
+                    verify_ecdsa_keccak(&payload, pub_hex, sig_hex)?;
+                }
+            }
+            if sig_shares.is_empty() {
+                return Err(anyhow!(
+                    "no round2_*.json files found in {}",
+                    round2_dir.display()
+                ));
+            }
 
-            // message bytes32
-            let msg32 = if let Some(h) = msg_hex.expect("message").strip_prefix("0x") { hex::decode(h)? } else { unreachable!() };
+            // Recover the message bytes32 for aggregation.
+            let msg32 = if let Some(h) = msg_hex.expect("message").strip_prefix("0x") {
+                hex::decode(h)?
+            } else {
+                unreachable!()
+            };
 
-            // Build verifying key package from minimal group.json + available share_*.json files
+            // 3) Reconstruct the group verifying key and per-signer verifying shares.
             let group_vk_bytes = hex::decode(&g.group_vk_sec1_hex)?;
             let group_vk = frost::VerifyingKey::deserialize(&group_vk_bytes)
                 .map_err(|e| anyhow!("group verifying key deserialize failed: {e}"))?;
 
             let needed_ids: Vec<frost::Identifier> = sig_shares.keys().cloned().collect();
-            let mut vmap: BTreeMap<frost::Identifier, frost::keys::VerifyingShare> = BTreeMap::new();
+            let mut vmap: BTreeMap<frost::Identifier, frost::keys::VerifyingShare> =
+                BTreeMap::new();
 
+            // Try to recover verifying shares from nearby share_*.json files (round1_dir or its parent).
             scan_dir_for_vshares(&round1_dir, &needed_ids, &mut vmap)?;
             if vmap.len() < needed_ids.len() {
-                if let Some(gdir) = group.parent() { scan_dir_for_vshares(gdir, &needed_ids, &mut vmap)?; }
+                if let Some(gdir) = group.parent() {
+                    scan_dir_for_vshares(gdir, &needed_ids, &mut vmap)?;
+                }
             }
             if vmap.len() < needed_ids.len() {
                 return Err(anyhow!("missing verifying shares for some participants"));
             }
 
+            // Assemble the PublicKeyPackage needed to verify the signature shares.
             let pubkey_package = frost::keys::PublicKeyPackage::new(vmap, group_vk);
-            // Final signing package from all commitments
+            // 4) Aggregate signature shares into the final signature.
             let signing_package = frost::SigningPackage::new(commitments_map, &msg32);
             let sig = frost::aggregate(&signing_package, &sig_shares, &pubkey_package)?;
 
-            // Pretty outputs
+            // Derive human-friendly affine coordinates for group VK and R.
             let vk_sec1 = hex::decode(&g.group_vk_sec1_hex)?;
             let vk_parsed = PublicKey::from_sec1_bytes(&vk_sec1)?;
             let vk_unc = vk_parsed.to_encoded_point(false);
@@ -310,10 +611,15 @@ fn main() -> Result<()> {
                 format!("0x{}", hex::encode(z_bytes))
             };
 
+            // Persist the final signature JSON for on-chain / off-chain verification.
             let out_obj = SignatureOut {
                 group_id: g.group_id,
                 signature_bincode_hex: hex::encode(bincode::serialize(&sig)?),
-                px, py, rx, ry, s: s_hex,
+                px,
+                py,
+                rx,
+                ry,
+                s: s_hex,
                 message: format!("0x{}", hex::encode(msg32)),
             };
             write_json(out, &out_obj)?;
