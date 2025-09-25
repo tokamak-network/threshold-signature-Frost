@@ -6,7 +6,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use k256::{AffinePoint, EncodedPoint, PublicKey};
+use k256::{AffinePoint, EncodedPoint};
 
 #[derive(Parser, Debug)]
 #[command(
