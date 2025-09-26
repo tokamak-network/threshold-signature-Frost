@@ -1,6 +1,6 @@
 # Tokamak FROST (secp256k1) — DKG, Signing & Verification
 
-> **Status:** Experimental / dev-only. Do **not** use in production.
+> **Status:** Experimental / dev-only.
 
 This workspace demonstrates a complete FROST (secp256k1) flow:
 
@@ -25,7 +25,7 @@ This workspace demonstrates a complete FROST (secp256k1) flow:
 First time (for the on‑chain verifier):
 ```bash
 cd onchain-verify
-npm i
+npm install
 cd ..
 ```
 
@@ -57,7 +57,7 @@ cd ..
 Runs the full demo (server, DKG clients, signing, verification, shutdown):
 
 ```bash
-make all out=run_dkg t=2 n=3 gid=mygroup topic=tok1 bind=127.0.0.1:9043
+make all out=run_dkg t=2 n=5 gid=mygroup bind=127.0.0.1:9043 msg='tokamak message to sign'
 ```
 
 What happens:
@@ -266,7 +266,3 @@ Notes:
 - The same long‑term ECDSA key authenticates DKG packets **and** decrypts Round‑2 ECIES; do not reuse in production.
 
 ---
-
-## License
-
-MIT/Apache‑2.0 (choose your preference). Provided **as is**, without warranty.
