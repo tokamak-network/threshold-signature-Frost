@@ -1,15 +1,17 @@
 # Tokamak FROST (secp256k1) — DKG, Signing & Verification
 
-> **Status:** Experimental / dev-only.
+> **Status:** Experimental / dev-only. Do **not** use in production.
 
 This workspace demonstrates a complete FROST (secp256k1) flow:
 
 1. **Interactive DKG** over WebSocket via a coordinator (`fserver`) and multiple clients (`dkg`).
-2. **Threshold signing** (2‑round) using artifacts produced by DKG (`signing`).
+2. **Interactive threshold signing** (2‑round) via the same coordinator (`fserver`) and clients (`signing`).
 3. **Verification** off‑chain (Rust) and on‑chain (Solidity/Hardhat).
 
+For a deeper architecture overview, see `docs/ARCHITECTURE.md`.
+
 **Key properties**
-- All DKG packets are **authenticated** with ECDSA (secp256k1) using **Keccak‑256** digests.
+- All DKG and signing packets are **authenticated** with ECDSA (secp256k1) using **Keccak‑256** digests.
 - DKG **Round‑2** payloads are **per‑recipient encrypted** (ECIES: secp256k1 ECDH → AES‑256‑GCM).
 - The coordinator exposes `/ws` for WebSocket and `/close` for graceful shutdown.
 
@@ -25,7 +27,7 @@ This workspace demonstrates a complete FROST (secp256k1) flow:
 First time (for the on‑chain verifier):
 ```bash
 cd onchain-verify
-npm install
+npm i
 cd ..
 ```
 
@@ -35,57 +37,57 @@ cd ..
 
 ```
 ./
-├─ fserver/               # DKG coordinator (server-only, WebSocket)
+├─ fserver/               # DKG and Signing coordinator (server-only, WebSocket)
 ├─ keygen/
 │  └─ dkg/                # DKG client (speaks to fserver)
-├─ signing/               # Round1 / Round2 / aggregate
+├─ signing/               # Interactive signing client (speaks to fserver)
 ├─ offchain-verify/       # Verifies signature.json off‑chain
 ├─ onchain-verify/        # Hardhat project (ZecFrost.sol + scripts)
 ├─ scripts/
 │  └─ make_users.js       # Generates users/user*.json (uids + ECDSA keys)
 ├─ users/                 # Auto‑generated users (created by scripts)
-├─ Makefile               # End‑to‑end drivers
+├─ Makefile               # End-to-end drivers
 └─ README.md
 ```
-
-> Older “trusted keygen” flows are **not** used by the Makefile. Use **DKG**.
 
 ---
 
 ## Quickstart (end‑to‑end, 2‑of‑3)
 
-Runs the full demo (server, DKG clients, signing, verification, shutdown):
+Runs the full demo (DKG, signing, verification, and server management):
 
 ```bash
-make all out=run_dkg t=2 n=5 gid=mygroup bind=127.0.0.1:9043 msg='tokamak message to sign'
+make all out=run_dkg t=2 n=3 gid=mygroup topic=tok1 bind=127.0.0.1:9043 msg="frosty"
 ```
 
 What happens:
-- `fserver` starts at `ws://127.0.0.1:9043/ws` and exposes `GET /close`.
-- `users/user1.json .. user3.json` are (re)generated if missing/mismatched.
-- A creator `dkg` client announces the topic; two followers join.
-- DKG rounds 1→2→finalize complete and write `run_dkg/group.json` and `run_dkg/share_*.json`.
-- `signing` produces partials and aggregates them into `run_dkg/signature.json`.
-- Off‑chain and on‑chain verifiers confirm the signature.
-- `GET /close` shuts the server down gracefully (~3s).
+1.  **DKG**: `fserver` starts, `dkg` clients run the distributed key generation, and artifacts (`group.json`, `share_*.json`) are saved to `run_dkg/`.
+2.  **Signing**: `fserver` restarts, and `signing` clients perform a 2-round interactive signing ceremony for the given message. The final signature is saved to `run_dkg/signature.json`.
+3.  **Verification**: Off‑chain and on‑chain verifiers confirm the signature is valid.
+4.  **Shutdown**: The server is closed gracefully.
 
 ---
 
 ## How it works (high‑level)
 
-1. **Coordinator** listens on `ws://<bind>/ws` and also provides `GET /close`.
-2. **Authentication:** clients request a challenge; server returns UUIDv4; client signs `Keccak256(UUID_bytes)` with its ECDSA key; server verifies.
-3. **Topic creation:** the creator supplies `min_signers (t)`, `max_signers (n)`, `group_id`, and a **roster** mapping `uid → ECDSA pub (compressed SEC1)`.
-4. **Join:** when all `n` participants have joined, server emits `ReadyRound1` and each participant receives their **FROST Identifier**.
-5. **Round‑1:** each client runs `dkg::part1`, **signs** its package, and submits. Server verifies and **broadcasts** all Round‑1 packages.
-6. **Round‑2:** each client runs `dkg::part2` and produces **(n‑1)** per‑recipient packages. Each is **ECIES‑encrypted** and **ECDSA‑signed (over the encrypted envelope)**. Server verifies and delivers **only** the recipient’s packages.
-7. **Finalize:** clients run `dkg::part3` → obtain their `KeyPackage` and the **group verifying key (VK)**. First valid finalize fixes the VK; all others must match. Server emits `Finalized`.
-8. **Artifacts:** each client writes `share_<ID>.json`; any client can aggregate signatures later using the `signing` tool.
+### DKG Flow
+1. **Coordinator** listens on `ws://<bind>/ws`.
+2. **Authentication:** Clients authenticate with the server using a challenge-response mechanism with ECDSA signatures.
+3. **Topic Creation (Creator):** One `dkg` client acts as the creator, announcing a new DKG topic with a list of participants and their public keys.
+4. **Join:** Other `dkg` clients join the topic. Once all participants are present, the server signals the start of Round 1.
+5. **Round 1 (Commitments):** Each client generates and submits its Round 1 package. The server broadcasts all packages to all participants.
+6. **Round 2 (Secret Shares):** Each client generates encrypted, per-recipient secret shares and sends them to the server, which forwards them to the correct recipients.
+7. **Finalize:** Each client computes its own secret key share and the group's public key, writing the results to `share_*.json` and `group.json`.
 
-**ECDSA signing domains** (Keccak‑256 over the bytes shown):
-- Round‑1: `"TOKAMAK_FROST_DKG_R1|" || topic || "|" || bincode(id) || bincode(round1_pkg)`
-- Round‑2: `"TOKAMAK_FROST_DKG_R2|" || topic || "|" || bincode(from_id) || bincode(to_id) || eph_pub_sec1 || nonce12 || ciphertext`
-- Finalize: `"TOKAMAK_FROST_DKG_FIN|" || topic || "|" || bincode(id) || group_vk_sec1`
+### Interactive Signing Flow
+1. **Coordinator** listens on `ws://<bind>/ws`.
+2. **Authentication:** `signing` clients authenticate just like `dkg` clients.
+3. **Topic Creation (Creator):** One `signing` client announces a new signing topic, providing the message to be signed and the list of signing participants.
+4. **Join:** Other `signing` clients join the topic. Once enough participants are present (matching the threshold `t`), the server signals the start of Round 1.
+5. **Round 1 (Nonces):** Each client generates and submits nonces and commitments. The server broadcasts these to all participants.
+6. **Round 2 (Signature Shares):** Each client uses the commitments from others to create and submit its partial signature share.
+7. **Aggregation:** The server collects enough signature shares to meet the threshold, aggregates them into a final signature, and broadcasts the result to all participants.
+8. **Artifact:** Each client writes the final `signature.json`.
 
 ---
 
@@ -94,175 +96,78 @@ What happens:
 ### 1) Start the coordinator
 ```bash
 cargo run -p fserver -- server --bind 127.0.0.1:9043
-# WS endpoint: ws://127.0.0.1:9043/ws
-# Shutdown:    curl -s http://127.0.0.1:9043/close   # → "server closing in 3s"
 ```
 
-### 2) Create users and roster (dev only)
+### 2) Generate user keys
 ```bash
+# This creates users/user1.json, user2.json, etc.
 node scripts/make_users.js users 3
-ls users/
-# user1.json user2.json user3.json
-```
-Each `user*.json` contains:
-```json
-{
-  "uid": 1,
-  "ecdsa_priv_hex": "<32-byte hex>",
-  "ecdsa_pub_sec1_hex": "<33-byte compressed SEC1 pubkey>"
-}
 ```
 
-### 3) Run the **creator** client
+### 3) Run DKG
+Run the creator and follower `dkg` clients as described in the `dkg` CLI help (`cargo run -p dkg -- --help`). Use the `Makefile` for the simplest experience.
+
+### 4) Run Interactive Signing
+After DKG is complete, you can perform a signing ceremony.
+
+**Creator (announces the signing topic):**
 ```bash
-export DKG_ECDSA_PRIV_HEX=$(node -e 'const fs=require("fs");console.log(JSON.parse(fs.readFileSync("users/user1.json","utf8")).ecdsa_priv_hex)')
-PARTS=1,2,3
-PUBS=$(node -e 'const fs=require("fs"); const dir="users"; const files=fs.readdirSync(dir).filter(n=>n.startsWith("user")&&n.endsWith(".json")).sort((a,b)=>parseInt(a.replace(/\D+/g,""))-parseInt(b.replace(/\D+/g,""))); console.log(files.map(n=>{const u=JSON.parse(fs.readFileSync(dir+"/"+n,"utf8")); return `${u.uid}:${u.ecdsa_pub_sec1_hex}`}).join(","))')
+# Set the creator's private key for auth
+export DKG_ECDSA_PRIV_HEX=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("users/user1.json")).ecdsa_priv_hex)')
 
-cargo run -p dkg -- \
+# Run the signing creator client
+cargo run -p signing -- \
   --url ws://127.0.0.1:9043/ws \
-  --topic tok1 \
-  --create --min-signers 2 --max-signers 3 \
-  --group-id mygroup \
-  --participants "$PARTS" \
-  --participants-pubs "$PUBS" \
+  --create \
+  --topic "my-signing-topic" \
+  --share run_dkg/share_ID_of_user1.json \
+  --message "Hello, FROST!" \
+  --participants "1,2" \
+  --group-file run_dkg/group.json \
   --out-dir run_dkg
 ```
 
-### 4) Run **followers**
+**Follower(s) (join the signing topic):**
 ```bash
-for i in 2 3; do 
-  DKG_ECDSA_PRIV_HEX=$(node -e "const fs=require('fs');console.log(JSON.parse(fs.readFileSync('users/user'+$i+'.json','utf8')).ecdsa_priv_hex)") \
-  cargo run -p dkg -- --url ws://127.0.0.1:9043/ws --topic tok1 --out-dir run_dkg &
-done; wait
+# Set the follower's private key for auth
+export DKG_ECDSA_PRIV_HEX=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("users/user2.json")).ecdsa_priv_hex)')
+
+# Run the signing follower client
+cargo run -p signing -- \
+  --url ws://127.0.0.1:9043/ws \
+  --topic "my-signing-topic" \
+  --share run_dkg/share_ID_of_user2.json \
+  --message "Hello, FROST!" \
+  --out-dir run_dkg
 ```
 
-You should now have `run_dkg/group.json` and one `share_<ID>.json` per participant.
+Upon success, all clients will write `run_dkg/signature.json`.
 
----
-
-## Artifacts & formats
-
-### `group.json`
-```json
-{
-  "group_id": "mygroup",
-  "threshold": 2,
-  "participants": 3,
-  "group_vk_sec1_hex": "02..."
-}
-```
-
-### `share_<ID>.json`
-```json
-{
-  "group_id": "mygroup",
-  "threshold": 2,
-  "participants": 3,
-  "signer_id_bincode_hex": "...",
-  "secret_share_bincode_hex": "...",
-  "verifying_share_bincode_hex": "...",
-  "group_vk_sec1_hex": "02..."
-}
-```
-
-### `signature.json` (produced by `signing aggregate`)
-```json
-{
-  "group_id": "mygroup",
-  "signature_bincode_hex": "...",  
-  "px": "0x...", "py": "0x...",  
-  "rx": "0x...", "ry": "0x...",  
-  "s":  "0x...",                   
-  "message": "0x..."               
-}
-```
-
----
-
-## Threshold signing & verification
-
-Round‑1 (per selected signer):
+### 5) Verify the signature
 ```bash
-cargo run -p signing -- round1 --share run_dkg/share_<ID>.json
-```
-Round‑2 (per selected signer):
-```bash
-cargo run -p signing -- round2 \
-  --share run_dkg/share_<ID>.json \
-  --round1-dir run_dkg \
-  --message 'tokamak message to sign' \
-  --participants-pubs "<uid:pubhex,uid:pubhex,...>"
-```
-Aggregate:
-```bash
-cargo run -p signing -- aggregate \
-  --group run_dkg/group.json \
-  --round1-dir run_dkg \
-  --round2-dir run_dkg \
-  --out run_dkg/signature.json \
-  --participants-pubs "<uid:pubhex,uid:pubhex,...>"
-```
-Verify off‑chain:
-```bash
+# Verify off-chain
 cargo run -p offchain-verify -- --signature run_dkg/signature.json
-# → Signature valid: true
-```
-Verify on‑chain (Hardhat):
-```bash
+
+# Verify on-chain
 cd onchain-verify
-SIG=../run_dkg/signature.json npx hardhat run scripts/verify-signature.ts --network hardhat
-# → On-chain verify: ✅ valid
+SIG=../run_dkg/signature.json npx hardhat run scripts/verify-signature.ts
 ```
 
 ---
 
-## CLI reference
+## Makefile Targets
 
-### `fserver`
-```
-USAGE:
-  fserver server [--bind <IP:PORT>]
-
-FLAGS:
-  --bind    Bind address for the WebSocket/HTTP server (default: 127.0.0.1:9000)
-
-Endpoints:
-  GET /ws     WebSocket upgrade
-  GET /close  Graceful shutdown in ~3 seconds
-```
-
-### `dkg`
-```
-USAGE:
-  dkg --url <WS_URL> --topic <STRING> [--create --min-signers <T> --max-signers <N> \
-       --group-id <ID> --participants <"1,2,..."> --participants-pubs <"uid:pubhex,...">] \
-      --out-dir <DIR> --ecdsa-priv-hex <HEX>
-
-ENV:
-  DKG_ECDSA_PRIV_HEX   32-byte ECDSA privkey hex (secp256k1) used to sign/authenticate DKG packets
-
-Notes:
-- `--create` is only used by the topic creator. Followers omit it.
-- `participants_pubs` entries are 33‑byte **compressed** SEC1 pubkeys in hex.
-```
-
----
-
-## Troubleshooting
-
-- **`participants length must equal max_signers`** – The roster doesn’t match `n`. Regenerate `users/` or fix the inputs.
-- **`invalid or reused challenge`** – Request a fresh challenge before `Login`.
-- **`user X is already logged in`** – That `uid` already has a session.
-- **`ECDSA verify failed`** – Check `participants_pubs` and signature formation.
-- **Stuck before Round‑2 dispatch** – Wait for server log: *“All R2 ready: dispatching targeted Round2All”*.
+- `make all`: Runs the full `dkg` → `signing` → `offchain` → `onchain` flow.
+- `make dkg`: Runs only the DKG ceremony to generate key shares.
+- `make signing`: Runs only the interactive signing ceremony.
+- `make offchain`: Runs the off-chain Rust verifier.
+- `make onchain`: Runs the on-chain Solidity/Hardhat verifier.
+- `make clean`: Removes generated artifacts.
+- `make close`: Shuts down the `fserver`.
 
 ---
 
 ## Security
 
-- `share_*.json` contains **secret material**. Do not commit or share.
+- `share_*.json` and `users/user*.json` contain **secret material**. Do not commit or share.
 - Demo code: no TLS, in‑memory state only, minimal replay protection.
-- The same long‑term ECDSA key authenticates DKG packets **and** decrypts Round‑2 ECIES; do not reuse in production.
-
----
