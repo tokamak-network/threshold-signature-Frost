@@ -23,7 +23,9 @@ run*/
 **/round2_*.json
 **/signature.json
 **/group.json         # generated; safe but not needed in VCS
-
+**/users
+**/run_dkg
+**/out
 # === Node/Hardhat (onchain) ===
 **/node_modules/
 **/artifacts/

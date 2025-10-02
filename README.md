@@ -1,192 +1,200 @@
-# Tokamak Threshold Frost Signature
+# Tokamak FROST (secp256k1) — DKG, Signing & Verification
+Session‑based Distributed Key Generation (DKG) and Schnorr (secp256k1) threshold signing.
 
-A minimal end-to-end demo of **Threshold Schnorr** with **FROST** over **secp256k1** (Zcash implementation).
+This workspace demonstrates a FROST (secp256k1) flow:
 
-> **Note:** This README covers the Rust workspace (`keygen`, `signing`, `verify`) **and** the on-chain Hardhat project in `onchain/` used to verify `signature.json` with `ZecFrost.sol`.
+1. **Interactive DKG** over WebSocket via a coordinator (`fserver`) and multiple clients (`dkg`).
+2. **Interactive threshold signing** (2‑round) via the same coordinator (`fserver`) and clients (`signing`).
+3. **Verification** off‑chain (Rust) and on‑chain (Solidity/Hardhat).
 
----
+## Overview
+**Tokamak‑FROST** implements:
+- A lightweight **coordinator** (`fserver`) that manages **sessions** over WebSocket.
+- CLI participants for **key generation** and **signing** using **FROST(secp256k1)** Schnorr.
+- Deterministic, reproducible **artifacts** (group info, shares, verifying keys, signatures) written to disk.
 
-## Workspace layout
-
+## Architecture
 ```
-./
-├─ keygen/
-│  └─ trusted/         # Rust crate: `keygen` (dealer-style key generation)
-├─ signing/            # Rust crate: `signing` (round1, round2, aggregate)
-├─ offchain-verify/    # Rust crate: `offchain-verify` (verifies signature.json only)
-├─ onchain-verify/     # Hardhat project with ZecFrost + scripts/verify-signature.ts
-├─ scripts/            # run_e2e.sh convenience script(s)
-├─ Makefile            # quick e2e targets (optional)
-└─ README.md
+ +----------+         ws://host:port/ws           +-----------+
+ | Creator  |  ─────────────────────────────────▶|           |
+ | (client) |    CreateSession → session_id       |           |
+ +----------+                                     |  fserver  |
+       ▲     JoinSession(session_id)              | (coord.)  |
+       │     …                                    |           |
+       │                                          +-----------+
+       │                                               ▲  ▲
+       │   JoinSession(session_id)                     │  │
+ +-----┴---+                                      Join/Msgs │
+ | Party B |                                              │
+ +---------+                                      +-------┴--+
+ | Party C |                                      | Signing  |
+ +---------+                                      | clients  |
+                                                  +----------+
 ```
+- The **first** client to connect (or an explicit creator CLI) sends **CreateSession**. The **fserver** replies with a **`session_id`** and persists minimal metadata.
+- All parties **JoinSession(session_id)** and proceed through the DKG and signing rounds coordinated by `fserver`.
 
-### Artifacts per run
-```
-- `group.json` – group metadata + **group verifying key** (compressed SEC1)
-- `share_*.json` – one per participant: **secret share** (private), **verifying share** (public), signer id, and copy of the group VK
-- `round1_*.json` – one per selected signer (commitments)
-- `round2_*.json` – one per selected signer (signature share, message Keccak-256 digest, and binding to the Round‑1 commitments set/root)
-- `signature.json` – aggregate result with fields:
-  - `group_id`, `px`, `py`, `rx`, `ry`, `s`, `message` (Keccak‑256 digest hex)
-  - `signature_bincode_hex` (raw FROST signature bytes; useful for interop/debug)
-- `participants.txt` *(optional)* – helper list of selected `share_*.json` when using `scripts/run_e2e.sh`; otherwise the selection is printed to stdout only
-```
+**Key properties**
+- All DKG and signing packets are **authenticated** with ECDSA (secp256k1) using **Keccak‑256** digests.
+- DKG **Round‑2** payloads are **per‑recipient encrypted** (ECIES: secp256k1 ECDH → AES‑256‑GCM).
+- The coordinator exposes `/ws` for WebSocket and `/close` for graceful shutdown.
 
 ---
 
 ## Requirements
 
 - Rust (stable) & Cargo
-- Node.js ≥ 18 (for on-chain verify)
-- bash (for the script)
-- `shuf`/`gshuf` optional (script falls back to `awk` if missing)
+- Node.js ≥ 18 (for Hardhat scripts & helper tooling)
+- A package manager (npm / pnpm / yarn)
+- bash + curl
 
----
-
-## Build
-
-```bash
-cargo build --workspace
-```
-
----
-
-## Quick start (single command)
-
-Here is how the protocol runs: keygen → random pick T signers → round1 → round2 → aggregate → verify.
-To run it for example for the setting *(t,n) = (3,5)* with the group name "*group1*" and output file *run1* with message "hello tokamak" run the following script.
-```bash
-bash scripts/run_e2e.sh -t 3 -n 5 -g group1 -o run1 -m "hello tokamak"
-```
-
-Flags:
-- `-t` — threshold (min signers)
-- `-n` — total participants
-- `-g` — group id
-- `-o` — output directory
-- `-m` — message (ASCII or `0x…` hex). The pipeline hashes this with **Keccak-256** before signing.
-
-Expected output:
-```
-Signature valid: true
-```
-
-### Via Makefile
-
-Run the full pipeline **plus** on-chain verification in one go:
-```bash
-make all-onchain t=3 n=5 gid=mygroup out=run1 msg="hello tokamak" net=hardhat
-```
-or 
-```bash
-bash scripts/run_e2e.sh -t 3 -n 5 -g mygroup -o run1 msg="hello tokamak"
-```
-
----
-
-
-### On-chain tests (Hardhat)
-
-To run the Hardhat tests for the on-chain verifier.
-Navigate to `onchain-verify/`:
+First time (for the on‑chain verifier):
 ```bash
 cd onchain-verify
+npm install
+cd ..
 ```
-
-```bash
-npx hardhat test test/ZecFrost.ts
-```
-
-## Manual flow
-
-### 1) Key generation
-```bash
-cargo run -p keygen --   --min-signers 3   --max-signers 5   --group-id mygroup   --out-dir run1
-```
-Outputs: `run1/group.json`, `run1/share_*.json`.
-
-**Schemas** (abridged):
-```jsonc
-// group.json
-{
-  "group_id": "mygroup",
-  "threshold": 3,
-  "participants": 5,
-  "group_vk_sec1_hex": "02…33 bytes…"
-}
-
-// share_….json  (keep secret)
-{
-  "group_id": "mygroup",
-  "threshold": 3,
-  "participants": 5,
-  "signer_id_bincode_hex": "…",          // bincode(Identifier)
-  "secret_share_bincode_hex": "…",       // bincode(SecretShare)
-  "verifying_share_bincode_hex": "…",    // bincode(VerifyingShare)
-  "group_vk_sec1_hex": "02…33 bytes…"
-}
-```
-
-### 2) Round 1 (per selected signer)
-```bash
-cargo run -p signing -- round1 --share run1/share_…json
-```
-Writes `run1/round1_<id>.json`.
-
-### 3) Round 2 (per selected signer)
-Provide the signer’s share and the directory containing the **matching** Round‑1 files. Message is hashed with Keccak‑256.
-```bash
-cargo run -p signing -- round2   --share run1/share_…json   --round1-dir run1   --message "hello tokamak delo"
-```
-Writes `run1/round2_<id>.json` and binds to one Round‑1 commitments set.
-
-### 4) Aggregate (single call)
-```bash
-cargo run -p signing -- aggregate   --group run1/group.json   --round1-dir run1   --round2-dir run1   --out run1/signature.json
-```
-Checks: all Round‑2 files agree on **same message digest** and **same Round‑1 commitments root**. Reconstructs the public key package from `group.json` + the verifying shares in selected `share_*.json`, then aggregates.
-
-### 5) Verify (no group.json needed)
-```bash
-cargo run -p verify -- --signature run1/signature.json
-```
-Rebuilds the verifying key from `(px,py)`, converts the FROST signature as `serialize_element(R) || serialize_scalar(s)` (compressed `R` || `s`), and verifies via `frost_secp256k1::verify`.
 
 ---
 
-## On-chain verification (Hardhat)
+## Repository layout
 
-Verify `signature.json` against `ZecFrost.sol` on a Hardhat network.
-
-### Script variant (env-driven)
-From `onchain/`:
-```bash
-SIG=../run1/signature.json npx hardhat run scripts/verify-signature.ts --network hardhat
 ```
-Attach to an existing deployment:
-```bash
-SIG=../run1/signature.json ADDRESS=0xYourZecFrost npx hardhat run scripts/verify-signature.ts --network hardhat
+./
+├─ fserver/               # DKG and Signing coordinator (server-only, WebSocket)
+├─ keygen/
+│  └─ dkg/                # Distrubuted Key Generation (DKG) client (speaks to fserver)
+|  └─ trusted/            # Dealer-based key generation 
+├─ signing/               # Interactive signing client (speaks to fserver)
+├─ offchain-verify/       # Verifies signature.json off‑chain
+├─ onchain-verify/        # Hardhat project (ZecFrost.sol + scripts)
+├─ scripts/
+│  └─ make_users.js       # Generates users/user*.json (uids + ECDSA keys)
+├─ users/                 # Auto‑generated users (created by scripts)
+├─ Makefile               # End-to-end drivers
+└─ README.md
 ```
 
+---
 
-### Hardhat task (optional)
-If you enabled the task in `hardhat.config.ts`:
+## Quickstart (end‑to‑end, 2‑of‑3)
+
+Runs the full demo (DKG, signing, verification, and server management):
+
 ```bash
-npx hardhat verify-signature --network hardhat --sig ../run1/signature.json
-# attach instead of deploy:
-npx hardhat verify-signature --network hardhat --sig ../run1/signature.json --address 0xYourZecFrost
+make all out=run_dkg t=2 n=3 gid=mygroup topic=tok1 bind=127.0.0.1:9043
+```
+
+What happens now:
+1. `fserver` starts and listens on **`ws://127.0.0.1:9054/ws`**.
+2. The **creator** client connects and sends **CreateSession**. The server emits a **`session_id`** (also saved to `run_dkg/session.txt`).
+3. Remaining participants **join** using that `session_id`.
+4. DKG completes → `group.json`, `users/*/share.json` written.
+5. A sample **signing** run is executed to produce `signature.json`.
+
+---
+
+## How it works (high‑level)
+
+### DKG Flow
+1. **Coordinator** listens on `ws://<bind>/ws`.
+2. **Authentication:** Clients authenticate with the server using a challenge-response mechanism with ECDSA signatures.
+3. **Topic Creation (Creator):** One `dkg` client acts as the creator, announcing a new DKG topic with a list of participants and their public keys.
+4. **Join:** Other `dkg` clients join the topic. Once all participants are present, the server signals the start of Round 1.
+5. **Round 1 (Commitments):** Each client generates and submits its Round 1 package. The server broadcasts all packages to all participants.
+6. **Round 2 (Secret Shares):** Each client generates encrypted, per-recipient secret shares and sends them to the server, which forwards them to the correct recipients.
+7. **Finalize:** Each client computes its own secret key share and the group's public key, writing the results to `share_*.json` and `group.json`.
+
+### Interactive Signing Flow
+1. **Coordinator** listens on `ws://<bind>/ws`.
+2. **Authentication:** `signing` clients authenticate just like `dkg` clients.
+3. **Topic Creation (Creator):** One `signing` client announces a new signing topic, providing the message to be signed and the list of signing participants.
+4. **Join:** Other `signing` clients join the topic. Once enough participants are present (matching the threshold `t`), the server signals the start of Round 1.
+5. **Round 1 (Nonces):** Each client generates and submits nonces and commitments. The server broadcasts these to all participants.
+6. **Round 2 (Signature Shares):** Each client uses the commitments from others to create and submit its partial signature share.
+7. **Aggregation:** The server collects enough signature shares to meet the threshold, aggregates them into a final signature, and broadcasts the result to all participants.
+8. **Artifact:** Each client writes the final `signature.json`.
+
+---
+
+## Manual run (advanced)
+
+### 1) Start the coordinator
+```bash
+cargo run -p fserver -- server --bind 127.0.0.1:9043
+```
+
+### 2) Generate user keys
+```bash
+# This creates users/user1.json, user2.json, etc.
+node scripts/make_users.js users 3
+```
+
+### 3) Run DKG
+Run the creator and follower `dkg` clients as described in the `dkg` CLI help (`cargo run -p dkg -- --help`). Use the `Makefile` for the simplest experience.
+
+### 4) Run Interactive Signing
+After DKG is complete, you can perform a signing ceremony.
+
+**Creator (announces the signing topic):**
+```bash
+# Set the creator's private key for auth
+export DKG_ECDSA_PRIV_HEX=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("users/user1.json")).ecdsa_priv_hex)')
+
+# Run the signing creator client
+cargo run -p signing -- \
+  --url ws://127.0.0.1:9043/ws \
+  --create \
+  --topic "my-signing-topic" \
+  --share run_dkg/share_ID_of_user1.json \
+  --message "Hello, FROST!" \
+  --participants "1,2" \
+  --group-file run_dkg/group.json \
+  --out-dir run_dkg
+```
+
+**Follower(s) (join the signing topic):**
+```bash
+# Set the follower's private key for auth
+export DKG_ECDSA_PRIV_HEX=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("users/user2.json")).ecdsa_priv_hex)')
+
+# Run the signing follower client
+cargo run -p signing -- \
+  --url ws://127.0.0.1:9043/ws \
+  --topic "my-signing-topic" \
+  --share run_dkg/share_ID_of_user2.json \
+  --message "Hello, FROST!" \
+  --out-dir run_dkg
+```
+
+Upon success, all clients will write `run_dkg/signature.json`.
+
+### 5) Verify the signature
+```bash
+# Verify off-chain
+cargo run -p offchain-verify -- --signature run_dkg/signature.json
+
+# Verify on-chain
+cd onchain-verify
+SIG=../run_dkg/signature.json npx hardhat run scripts/verify-signature.ts
 ```
 
 ## Troubleshooting
+- **Port already in use**: pick another `--bind` or stop the previous server.
+- **`no such file or directory: emsdk_env.sh`**: This repo doesn’t require Emscripten. Remove stray `source …/emsdk_env.sh` lines from your shell rc files if you see this warning.
+- **Firewall/WSS**: for remote clients use `wss://` with proper TLS termination.
+- **Artifacts missing**: ensure the `out/` directory is writable; the demo wipes it before each run.
 
-- **`unexpected argument '--shares-dir'`**  
-  Round 1 operates **per share**: use `--share <file>` (no `--shares-dir`).
+---
 
-- **`Invalid signature share.` or `Signature valid: false`**  
-  Usually mixing files across runs or signer sets. Ensure `round1_dir` and `round2_dir` contain only files from the **same** selected set. Clean the output dir and re-run.
+## Makefile Targets
 
-- **`Malformed scalar encoding` (verify)**  
-  Indicates point/scalar decoding mismatch. Re-aggregate cleanly. Verifier expects compressed SEC1 points and signature bytes `33(R) || 32(s)`.
+- `make all`: Runs the full `dkg` → `signing` → `offchain` → `onchain` flow.
+- `make dkg`: Runs only the DKG ceremony to generate key shares.
+- `make signing`: Runs only the interactive signing ceremony.
+- `make offchain`: Runs the off-chain Rust verifier.
+- `make onchain`: Runs the on-chain Solidity/Hardhat verifier.
+- `make clean`: Removes generated artifacts.
+- `make close`: Shuts down the `fserver`.
 
-- **Random selection**  
-  `scripts/run_e2e.sh` writes randomly chosen signers to `participants.txt`. Edit it if you want a specific set.
+---

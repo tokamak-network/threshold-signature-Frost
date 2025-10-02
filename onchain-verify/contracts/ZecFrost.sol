@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LGPLv3
 pragma solidity ^0.8.29;
-
+import "./IZecFrost.sol";
 /// @title FROST(secp256k1, SHA-256) On-chain Verifier (ecrecover trick)
 /// @notice Verifies Schnorr signatures produced by FROST (Zcash Foundation style).
 /// @dev Uses the ecrecover-based mul–mul–add trick:
 ///      checks that address(-z*G + e*P) == address(-R), with
 ///      e = H2( Serialize(R) || Serialize(P) || msg ),
 ///      H2 = hash_to_field via ExpandMessageXMD(SHA-256) as per RFC 9591 §6.5.
-contract ZecFrost {
+contract ZecFrost is IZecFrost {
     // secp256k1 base field prime and scalar field order
     uint256 private constant _P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f;
     uint256 private constant _N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
