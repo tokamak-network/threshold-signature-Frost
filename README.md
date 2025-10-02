@@ -1,14 +1,38 @@
 # Tokamak FROST (secp256k1) — DKG, Signing & Verification
+Session‑based Distributed Key Generation (DKG) and Schnorr (secp256k1) threshold signing.
 
-> **Status:** Experimental / dev-only. Do **not** use in production.
-
-This workspace demonstrates a complete FROST (secp256k1) flow:
+This workspace demonstrates a FROST (secp256k1) flow:
 
 1. **Interactive DKG** over WebSocket via a coordinator (`fserver`) and multiple clients (`dkg`).
 2. **Interactive threshold signing** (2‑round) via the same coordinator (`fserver`) and clients (`signing`).
 3. **Verification** off‑chain (Rust) and on‑chain (Solidity/Hardhat).
 
-For a deeper architecture overview, see `docs/ARCHITECTURE.md`.
+## Overview
+**Tokamak‑FROST** implements:
+- A lightweight **coordinator** (`fserver`) that manages **sessions** over WebSocket.
+- CLI participants for **key generation** and **signing** using **FROST(secp256k1)** Schnorr.
+- Deterministic, reproducible **artifacts** (group info, shares, verifying keys, signatures) written to disk.
+
+## Architecture
+```
+ +----------+         ws://host:port/ws           +-----------+
+ | Creator  |  ─────────────────────────────────▶|           |
+ | (client) |    CreateSession → session_id       |           |
+ +----------+                                     |  fserver  |
+       ▲     JoinSession(session_id)              | (coord.)  |
+       │     …                                    |           |
+       │                                          +-----------+
+       │                                               ▲  ▲
+       │   JoinSession(session_id)                     │  │
+ +-----┴---+                                      Join/Msgs │
+ | Party B |                                              │
+ +---------+                                      +-------┴--+
+ | Party C |                                      | Signing  |
+ +---------+                                      | clients  |
+                                                  +----------+
+```
+- The **first** client to connect (or an explicit creator CLI) sends **CreateSession**. The **fserver** replies with a **`session_id`** and persists minimal metadata.
+- All parties **JoinSession(session_id)** and proceed through the DKG and signing rounds coordinated by `fserver`.
 
 **Key properties**
 - All DKG and signing packets are **authenticated** with ECDSA (secp256k1) using **Keccak‑256** digests.
@@ -27,7 +51,7 @@ For a deeper architecture overview, see `docs/ARCHITECTURE.md`.
 First time (for the on‑chain verifier):
 ```bash
 cd onchain-verify
-npm i
+npm install
 cd ..
 ```
 
@@ -39,7 +63,8 @@ cd ..
 ./
 ├─ fserver/               # DKG and Signing coordinator (server-only, WebSocket)
 ├─ keygen/
-│  └─ dkg/                # DKG client (speaks to fserver)
+│  └─ dkg/                # Distrubuted Key Generation (DKG) client (speaks to fserver)
+|  └─ trusted/            # Dealer-based key generation 
 ├─ signing/               # Interactive signing client (speaks to fserver)
 ├─ offchain-verify/       # Verifies signature.json off‑chain
 ├─ onchain-verify/        # Hardhat project (ZecFrost.sol + scripts)
@@ -57,14 +82,15 @@ cd ..
 Runs the full demo (DKG, signing, verification, and server management):
 
 ```bash
-make all out=run_dkg t=2 n=3 gid=mygroup topic=tok1 bind=127.0.0.1:9043 msg="frosty"
+make all out=run_dkg t=2 n=3 gid=mygroup topic=tok1 bind=127.0.0.1:9043
 ```
 
-What happens:
-1.  **DKG**: `fserver` starts, `dkg` clients run the distributed key generation, and artifacts (`group.json`, `share_*.json`) are saved to `run_dkg/`.
-2.  **Signing**: `fserver` restarts, and `signing` clients perform a 2-round interactive signing ceremony for the given message. The final signature is saved to `run_dkg/signature.json`.
-3.  **Verification**: Off‑chain and on‑chain verifiers confirm the signature is valid.
-4.  **Shutdown**: The server is closed gracefully.
+What happens now:
+1. `fserver` starts and listens on **`ws://127.0.0.1:9054/ws`**.
+2. The **creator** client connects and sends **CreateSession**. The server emits a **`session_id`** (also saved to `run_dkg/session.txt`).
+3. Remaining participants **join** using that `session_id`.
+4. DKG completes → `group.json`, `users/*/share.json` written.
+5. A sample **signing** run is executed to produce `signature.json`.
 
 ---
 
@@ -153,6 +179,12 @@ cd onchain-verify
 SIG=../run_dkg/signature.json npx hardhat run scripts/verify-signature.ts
 ```
 
+## Troubleshooting
+- **Port already in use**: pick another `--bind` or stop the previous server.
+- **`no such file or directory: emsdk_env.sh`**: This repo doesn’t require Emscripten. Remove stray `source …/emsdk_env.sh` lines from your shell rc files if you see this warning.
+- **Firewall/WSS**: for remote clients use `wss://` with proper TLS termination.
+- **Artifacts missing**: ensure the `out/` directory is writable; the demo wipes it before each run.
+
 ---
 
 ## Makefile Targets
@@ -166,8 +198,3 @@ SIG=../run_dkg/signature.json npx hardhat run scripts/verify-signature.ts
 - `make close`: Shuts down the `fserver`.
 
 ---
-
-## Security
-
-- `share_*.json` and `users/user*.json` contain **secret material**. Do not commit or share.
-- Demo code: no TLS, in‑memory state only, minimal replay protection.
