@@ -186,15 +186,3 @@ SIG=../run_dkg/signature.json npx hardhat run scripts/verify-signature.ts
 - **Artifacts missing**: ensure the `out/` directory is writable; the demo wipes it before each run.
 
 ---
-
-## Makefile Targets
-
-- `make all`: Runs the full `dkg` → `signing` → `offchain` → `onchain` flow.
-- `make dkg`: Runs only the DKG ceremony to generate key shares.
-- `make signing`: Runs only the interactive signing ceremony.
-- `make offchain`: Runs the off-chain Rust verifier.
-- `make onchain`: Runs the on-chain Solidity/Hardhat verifier.
-- `make clean`: Removes generated artifacts.
-- `make close`: Shuts down the `fserver`.
-
----
