@@ -36,7 +36,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
-
+use tokio::time::{self, Instant};
 // -------- ECDSA auth helpers (source integrity & authentication) --------
 fn auth_payload_round1(
     session: &str,
@@ -350,6 +350,55 @@ impl Default for Inner {
     }
 }
 
+// ============== Session timeout helper (3 minutes) ==============
+fn start_session_timeout(state: AppState, session: String, is_sign: bool) {
+    // Spawn a background task that expires the session after 180 seconds
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(180)).await;
+
+        // Collect the client senders for participants and remove the session
+        let (senders, kind) = {
+            let mut inner = state.inner.lock().await;
+            if is_sign {
+                if let Some(sign_session) = inner.sign_sessions.remove(&session) {
+                    let mut v = Vec::new();
+                    for uid in sign_session.participants {
+                        if let Some(tx) = inner.conns.get(&uid) {
+                            v.push(tx.clone());
+                        }
+                    }
+                    (v, "signing")
+                } else {
+                    (Vec::new(), "signing")
+                }
+            } else {
+                if let Some(dkg_session) = inner.sessions.remove(&session) {
+                    let mut v = Vec::new();
+                    for uid in dkg_session.participants {
+                        if let Some(tx) = inner.conns.get(&uid) {
+                            v.push(tx.clone());
+                        }
+                    }
+                    (v, "dkg")
+                } else {
+                    (Vec::new(), "dkg")
+                }
+            }
+        };
+
+        // Notify clients and close their WebSocket connections
+        for tx in senders {
+            let _ = tx.send(Message::Text(
+                serde_json::to_string(&ServerMsg::Error {
+                    message: format!("{} session {} expired after 3 minutes", kind, session),
+                })
+                .unwrap(),
+            ));
+            let _ = tx.send(Message::Close(None));
+        }
+    });
+}
+
 // ========================= Server =========================
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -520,6 +569,8 @@ async fn handle_client_text(
             };
             inner.sessions.insert(session.clone(), session_obj);
             println!("[server] Announced session '{}'", session);
+            // Start a 3-minute timeout for this DKG session
+            start_session_timeout(state.clone(), session.clone(), false);
 
             // Reply to creator with the session id
             let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::SessionCreated {
@@ -557,8 +608,13 @@ async fn handle_client_text(
                 None => return Err(anyhow!("public key not registered in any session roster")),
             };
 
-            if inner.conns.contains_key(&uid) {
-                return Err(anyhow!("user {} is already logged in", uid));
+            // Allow re-authentication by removing existing connection
+            if inner.conns.contains_key(&uid)
+            {
+                println!("[server] user {} already logged in, allowing re-authentication", uid);
+                inner.conns.remove(&uid);
+                // Also clean up any existing tokens for this user
+                inner.active_tokens.retain(|_, token_uid| *token_uid != uid);
             }
 
             let token = Uuid::new_v4().to_string();
@@ -941,7 +997,9 @@ async fn handle_client_text(
                 msg32,
                 roster_snapshot: roster_vec,
             });
-            let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::SignSessionCreated { session })?));
+            let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::SignSessionCreated { session: session.clone() })?));
+            // Start a 3-minute timeout for this signing session
+            start_session_timeout(state.clone(), session.clone(), true);
         }
         ClientMsg::JoinSignSession { session, signer_id_bincode_hex, verifying_share_bincode_hex } => {
             let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;

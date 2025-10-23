@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["keygen/trusted","keygen/dkg", "fserver","signing", "offchain-verify"]
+members = ["keygen/trusted","keygen/dkg", "fserver","signing", "offchain-verify", "wasm"]
 
 [workspace.package]
 edition = "2021"

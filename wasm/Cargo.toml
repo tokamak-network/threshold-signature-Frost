@@ -1,0 +1,32 @@
+[package]
+name = "tokamak-frost-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2.87"
+frost-core = { workspace = true }
+frost-secp256k1 = { workspace = true }
+k256 = { workspace = true }
+signature = { workspace = true }
+
+sha3 = "0.10.8"
+rand = "0.8.5"
+getrandom = { version = "0.2", features = ["js"] }
+bincode = "1.3.3"
+serde = { version = "1.0", features = ["derive"] }
+hex = "0.4.3"
+anyhow = "1.0.75"
+uuid = { version = "1.4.1", features = ["v4", "js"] }
+console_error_panic_hook = "0.1.7"
+serde_json = "1.0.108"
+aes-gcm = "0.10.3"
+serde-wasm-bindgen = "0.6.5"
+wasm-gen = "0.1.4"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.37"
+
