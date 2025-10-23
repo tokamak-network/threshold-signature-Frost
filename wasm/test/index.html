@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DKG WASM Integration Test</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; padding: 1em; }
+        #result { font-size: 1.2em; font-weight: bold; }
+        .pass { color: green; }
+        .fail { color: red; }
+        pre { background-color: #f4f4f4; padding: 1em; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+    <script type="module">
+        import init, {
+            generate_ecdsa_keypair,
+            get_identifier_hex,
+            dkg_part1,
+            dkg_part2,
+            dkg_part3,
+            ecies_encrypt,
+            ecies_decrypt
+        } from '../pkg/tokamak_frost_wasm.js';
+
+        // Helper to log messages to the screen
+        function log(message) {
+            const logEl = document.getElementById('log');
+            logEl.textContent += message + '\n';
+            console.log(message);
+        }
+
+        async function run_test() {
+            const resultDisplay = document.getElementById('result');
+            try {
+                log('Initializing WASM module...');
+                await init();
+                log('WASM Initialized.');
+
+                // ====================================================================
+                // 1. Setup Participants
+                // ====================================================================
+                log('\n--- Step 1: Setup Participants ---');
+                const MAX_SIGNERS = 2;
+                const MIN_SIGNERS = 2;
+
+                log('Generating keys for Alice...');
+                const alice_keys = JSON.parse(generate_ecdsa_keypair());
+                const alice_id_hex = get_identifier_hex(1);
+
+                log('Generating keys for Bob...');
+                const bob_keys = JSON.parse(generate_ecdsa_keypair());
+                const bob_id_hex = get_identifier_hex(2);
+
+                log(`Alice's Identifier Hex: ${alice_id_hex}`);
+                log(`Bob's Identifier Hex: ${bob_id_hex}`);
+
+                // ====================================================================
+                // 2. DKG Round 1
+                // ====================================================================
+                log('\n--- Step 2: DKG Round 1 ---');
+                log('Alice running part 1...');
+                const alice_r1_output = JSON.parse(dkg_part1(alice_id_hex, MAX_SIGNERS, MIN_SIGNERS));
+
+                log('Bob running part 1...');
+                const bob_r1_output = JSON.parse(dkg_part1(bob_id_hex, MAX_SIGNERS, MIN_SIGNERS));
+
+                // ====================================================================
+                // 3. DKG Round 2
+                // ====================================================================
+                log('\n--- Step 3: DKG Round 2 ---');
+                const alice_r1_packages_for_part2 = { [bob_id_hex]: bob_r1_output.public_package_hex };
+                log('Alice running part 2...');
+                const alice_r2_output = JSON.parse(dkg_part2(alice_r1_output.secret_package_hex, alice_r1_packages_for_part2));
+
+                const bob_r1_packages_for_part2 = { [alice_id_hex]: alice_r1_output.public_package_hex };
+                log('Bob running part 2...');
+                const bob_r2_output = JSON.parse(dkg_part2(bob_r1_output.secret_package_hex, bob_r1_packages_for_part2));
+
+                // ====================================================================
+                // 4. ECIES Encryption & Decryption (Simulating network transfer)
+                // ====================================================================
+                log('\n--- Step 4: Encrypt & Decrypt Shares ---');
+                const alice_pkg_for_bob = alice_r2_output.outgoing_packages[bob_id_hex];
+                log('Alice encrypting share for Bob...');
+                const encrypted_for_bob = JSON.parse(ecies_encrypt(bob_keys.public_key_hex, alice_pkg_for_bob));
+
+                const bob_pkg_for_alice = bob_r2_output.outgoing_packages[alice_id_hex];
+                log('Bob encrypting share for Alice...');
+                const encrypted_for_alice = JSON.parse(ecies_encrypt(alice_keys.public_key_hex, bob_pkg_for_alice));
+
+                log('Alice decrypting share from Bob...');
+                const decrypted_by_alice_hex = ecies_decrypt(
+                    alice_keys.private_key_hex,
+                    encrypted_for_alice.ephemeral_public_key_hex,
+                    encrypted_for_alice.nonce_hex,
+                    encrypted_for_alice.ciphertext_hex
+                );
+
+                log('Bob decrypting share from Alice...');
+                const decrypted_by_bob_hex = ecies_decrypt(
+                    bob_keys.private_key_hex,
+                    encrypted_for_bob.ephemeral_public_key_hex,
+                    encrypted_for_bob.nonce_hex,
+                    encrypted_for_bob.ciphertext_hex
+                );
+
+                // ====================================================================
+                // 5. DKG Round 3 (Finalize)
+                // ====================================================================
+                log('\n--- Step 5: DKG Round 3 (Finalize) ---');
+                const alice_r1_pkgs_for_part3 = { [bob_id_hex]: bob_r1_output.public_package_hex };
+                const alice_r2_pkgs_for_part3 = { [bob_id_hex]: decrypted_by_alice_hex };
+                log('Alice running part 3...');
+                const alice_final_output = JSON.parse(dkg_part3(alice_r2_output.secret_package_hex, alice_r1_pkgs_for_part3, alice_r2_pkgs_for_part3));
+
+                const bob_r1_pkgs_for_part3 = { [alice_id_hex]: alice_r1_output.public_package_hex };
+                const bob_r2_pkgs_for_part3 = { [alice_id_hex]: decrypted_by_bob_hex };
+                log('Bob running part 3...');
+                const bob_final_output = JSON.parse(dkg_part3(bob_r2_output.secret_package_hex, bob_r1_pkgs_for_part3, bob_r2_pkgs_for_part3));
+
+                // ====================================================================
+                // 6. Verification
+                // ====================================================================
+                log('\n--- Step 6: Verification ---');
+                log(`Alice's Group Key: ${alice_final_output.group_public_key_hex}`);
+                log(`Bob's Group Key:   ${bob_final_output.group_public_key_hex}`);
+
+                if (alice_final_output.group_public_key_hex === bob_final_output.group_public_key_hex) {
+                    log('✅ Group public keys match!');
+                    resultDisplay.textContent = '✅ DKG Ceremony Test Passed!';
+                    resultDisplay.className = 'pass';
+                } else {
+                    throw new Error('Group public keys do not match!');
+                }
+
+            } catch (e) {
+                const errorMessage = `❌ Test Failed: ${e.message}`;
+                log(errorMessage);
+                resultDisplay.textContent = errorMessage;
+                resultDisplay.className = 'fail';
+                console.error(e);
+            }
+        }
+
+        run_test();
+    </script>
+</head>
+<body>
+    <h1>DKG WASM Integration Test</h1>
+    <p>Follow the test execution below. Final result is at the top.</p>
+    <h2 id="result">Running test...</h2>
+    <pre id="log"></pre>
+</body>
+</html>
