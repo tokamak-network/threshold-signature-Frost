@@ -36,7 +36,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
-use tokio::time::{self, Instant};
+
 // -------- ECDSA auth helpers (source integrity & authentication) --------
 fn auth_payload_round1(
     session: &str,
@@ -143,6 +143,10 @@ enum ClientMsg {
     JoinSession {
         session: String,
     },
+    /// List DKG sessions the caller can join (still pending/finalizing)
+    ListPendingDKGSessions,
+    /// List Signing sessions the caller can join (still pending/not all joined)
+    ListPendingSigningSessions,
 
     // DKG round messages
     Round1Submit {
@@ -201,6 +205,11 @@ enum ServerMsg {
     Challenge { challenge: String },
     LoginOk { user_id: u32, access_token: String },
 
+    /// Returned in response to ClientMsg::ListPendingDKGSessions
+    PendingDKGSessions { sessions: Vec<PendingDKGSession> },
+    /// Returned in response to ClientMsg::ListPendingSigningSessions
+    PendingSigningSessions { sessions: Vec<PendingSignSession> },
+
     /// Sent to the creator after a successful AnnounceSession
     SessionCreated { session: String },
 
@@ -252,6 +261,27 @@ enum ServerMsg {
         s: String,
         message: String,
     },
+}
+
+// Used by ServerMsg::PendingDKGSessions
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PendingDKGSession {
+    session: String,
+    group_id: String,
+    min_signers: u16,
+    max_signers: u16,
+    participants: Vec<u32>,
+    joined: Vec<u32>,
+}
+
+// Used by ServerMsg::PendingSigningSessions
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PendingSignSession {
+    session: String,
+    group_id: String,
+    threshold: u16,
+    participants: Vec<u32>,
+    joined: Vec<u32>,
 }
 
 
@@ -487,12 +517,64 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         }
     }
 
-    // Cleanup on disconnect
+    // Cleanup on disconnect + notify other participants
     if let Some(uid) = session_uid {
-        let mut inner = state.inner.lock().await;
-        inner.conns.remove(&uid);
-        if let Some(token) = access_token {
-            inner.active_tokens.remove(&token);
+        // Keep a copy of the token for removal after borrow
+        let token_to_remove = access_token.clone();
+
+        // Collect {tx, message} pairs outside the mutex to avoid holding the lock while sending
+        let mut notify: Vec<(Tx, String)> = Vec::new();
+        {
+            let mut inner = state.inner.lock().await;
+
+            // First collect (other_uid, msg) pairs while we mutably borrow sessions
+            let mut notify_targets: Vec<(u32, String)> = Vec::new();
+
+            // DKG sessions: if this user had joined, remove and prepare notifications
+            for (_sid, s) in inner.sessions.iter_mut() {
+                if s.joined.remove(&uid) {
+                    let msg = format!(
+                        "Participant {} disconnected from DKG session {}",
+                        uid, s.session
+                    );
+                    for other_uid in s.participants.iter().copied().filter(|u| *u != uid) {
+                        notify_targets.push((other_uid, msg.clone()));
+                    }
+                }
+            }
+
+            // Signing sessions: if this user had joined, remove and prepare notifications
+            for (_sid, s) in inner.sign_sessions.iter_mut() {
+                if s.joined.remove(&uid) {
+                    let msg = format!(
+                        "Participant {} disconnected from signing session {}",
+                        uid, s.session
+                    );
+                    for other_uid in s.participants.iter().copied().filter(|u| *u != uid) {
+                        notify_targets.push((other_uid, msg.clone()));
+                    }
+                }
+            }
+
+            // Now resolve notify_targets to actual Tx senders after mutable borrows end
+            for (other_uid, text) in notify_targets {
+                if let Some(tx_other) = inner.conns.get(&other_uid) {
+                    notify.push((tx_other.clone(), text.clone()));
+                }
+            }
+
+            // Remove connection and token
+            inner.conns.remove(&uid);
+            if let Some(ref token) = token_to_remove {
+                inner.active_tokens.remove(token);
+            }
+        }
+
+        // Send notifications after releasing the lock
+        for (tx_other, text) in notify {
+            let _ = tx_other.send(Message::Text(
+                serde_json::to_string(&ServerMsg::Info { message: text }).unwrap(),
+            ));
         }
     }
 }
@@ -611,7 +693,7 @@ async fn handle_client_text(
             // Allow re-authentication by removing existing connection
             if inner.conns.contains_key(&uid)
             {
-                println!("[server] user {} already logged in, allowing re-authentication", uid);
+                println!("[server] participant {} already logged in, allowing re-authentication", uid);
                 inner.conns.remove(&uid);
                 // Also clean up any existing tokens for this user
                 inner.active_tokens.retain(|_, token_uid| *token_uid != uid);
@@ -656,17 +738,33 @@ async fn handle_client_text(
             let mut max_s = 0u16;
             let mut roster_vec = Vec::new();
 
+            // New: collect notifications for other participants
+            let mut others_to_notify: Vec<Tx> = Vec::new();
+            let join_msg: String;
+            // Collect UIDs first to avoid borrowing `inner` immutably while `s` is mutably borrowed
+            let mut other_uids: Vec<u32> = Vec::new();
+
             {
                 let s = inner
                     .sessions
                     .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown session"))?;
                 if !s.participants.contains(&uid) {
-                    return Err(anyhow!("user not in allowed participants"));
+                    return Err(anyhow!("participant not in allowed participants"));
                 }
                 s.joined.insert(uid);
                 let joined_count = s.joined.len();
                 let total_count = s.participants.len();
+
+                // Prepare the join notification and collect recipients (excluding the joiner)
+                join_msg = format!(
+                    "participant {} joined session {} ({}/{})",
+                    uid, s.session, joined_count, total_count
+                );
+                for other_uid in s.participants.iter().copied().filter(|u| *u != uid) {
+                    other_uids.push(other_uid);
+                }
+
                 if joined_count == total_count {
                     notify_all = true;
                     session_name = s.session.clone();
@@ -682,12 +780,36 @@ async fn handle_client_text(
                     }
                     roster_vec = roster;
                 } else {
-                    let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::Info {
+                    // still inform the joiner of current progress
+                   /* let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::Info {
                         message: format!("joined {}/{}", joined_count, total_count),
-                    })?));
+                    })?));*/
+
+                    for uid_i in inner.sessions[&session].participants.clone() {
+                        if let Some(tx_i) = inner.conns.get(&uid_i) {
+                            let _ = tx_i.send(Message::Text(
+                                serde_json::to_string(&ServerMsg::Info { message: format!("joined {}/{}", joined_count, total_count) })?,
+                            ));
+                        }
+                    }
                 }
             }
 
+            // Now that the mutable borrow of `s` is dropped, we can read from `inner.conns`
+            for other_uid in other_uids {
+                if let Some(tx_other) = inner.conns.get(&other_uid) {
+                    others_to_notify.push(tx_other.clone());
+                }
+            }
+
+            // Send "join" Info to other connected participants in this session
+            for tx_other in others_to_notify {
+                let _ = tx_other.send(Message::Text(
+                    serde_json::to_string(&ServerMsg::Info { message: join_msg.clone() })?,
+                ));
+            }
+
+            // If everyone has joined, proceed with existing ReadyRound1 broadcast
             if notify_all {
                 for uid_i in inner.sessions[&session].participants.clone() {
                     if let Some(tx_i) = inner.conns.get(&uid_i) {
@@ -706,6 +828,56 @@ async fn handle_client_text(
                     }
                 }
             }
+        }
+        ClientMsg::ListPendingDKGSessions => {
+            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+
+            let sessions_payload: Vec<PendingDKGSession> = {
+                let inner = state.inner.lock().await;
+                inner
+                    .sessions
+                    .values()
+                    // Only sessions this user is a participant in and not fully finalized
+                    .filter(|s| s.participants.contains(&uid) && s.finalized_uids.len() < s.participants.len())
+                    .map(|s| PendingDKGSession {
+                        session: s.session.clone(),
+                        group_id: s.group_id.clone(),
+                        min_signers: s.min_signers,
+                        max_signers: s.max_signers,
+                        participants: s.participants.clone(),
+                        joined: s.joined.iter().copied().collect(),
+                    })
+                    .collect()
+            };
+
+            let _ = tx.send(Message::Text(
+                serde_json::to_string(&ServerMsg::PendingDKGSessions { sessions: sessions_payload })?
+            ));
+        }
+
+        ClientMsg::ListPendingSigningSessions => {
+            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+
+            let sessions_payload: Vec<PendingSignSession> = {
+                let inner = state.inner.lock().await;
+                inner
+                    .sign_sessions
+                    .values()
+                    // Only sessions this user is a participant in and not yet fully joined
+                    .filter(|s| s.participants.contains(&uid) && s.joined.len() < s.participants.len())
+                    .map(|s| PendingSignSession {
+                        session: s.session.clone(),
+                        group_id: s.group_id.clone(),
+                        threshold: s.threshold,
+                        participants: s.participants.clone(),
+                        joined: s.joined.iter().copied().collect(),
+                    })
+                    .collect()
+            };
+
+            let _ = tx.send(Message::Text(
+                serde_json::to_string(&ServerMsg::PendingSigningSessions { sessions: sessions_payload })?
+            ));
         }
         ClientMsg::Round1Submit { session, id_hex, pkg_bincode_hex, sig_ecdsa_hex } => {
             let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;

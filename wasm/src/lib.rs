@@ -51,12 +51,74 @@ pub fn sign_challenge(private_key_hex: &str, challenge: &str) -> Result<String, 
 }
 
 #[wasm_bindgen]
+pub fn sign_message(private_key_hex: &str, message_hex: &str) -> Result<String, JsError> {
+    let sk_bytes = hex::decode(private_key_hex).map_err(|e| JsError::new(&e.to_string()))?;
+    let sk = K256SecretKey::from_slice(&sk_bytes).map_err(|e| JsError::new(&e.to_string()))?;
+    let signing_key = EcdsaSigningKey::from_bytes(&sk.to_bytes()).expect("dd");
+    let message_bytes = hex::decode(message_hex).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let sig: EcdsaSignature = signing_key.sign_digest(Keccak256::new().chain_update(&message_bytes));
+    Ok(hex::encode(sig.to_der().as_bytes()))
+}
+
+#[wasm_bindgen]
 pub fn get_identifier_hex(id: u16) -> Result<String, JsError> {
     let scalar = k256::Scalar::from(id as u64);
     let identifier = frost::Identifier::new(scalar).map_err(|e| JsError::new(&e.to_string()))?;
-    // Use the type's own serialization, which guarantees a 32-byte array.
     let identifier_bytes = identifier.serialize();
     Ok(hex::encode(identifier_bytes))
+}
+
+// ====================================================================
+// region: Auth Payload Construction
+// ====================================================================
+
+#[wasm_bindgen]
+pub fn get_auth_payload_round1(session_id: &str, id_hex: &str, pkg_hex: &str) -> Result<String, JsError> {
+    let id: frost::Identifier = bincode::deserialize(&hex::decode(id_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let pkg: frost::keys::dkg::round1::Package = bincode::deserialize(&hex::decode(pkg_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let mut v = b"TOKAMAK_FROST_DKG_R1|".to_vec();
+    v.extend_from_slice(session_id.as_bytes());
+    v.extend_from_slice(b"|");
+    v.extend_from_slice(&bincode::serialize(&id).unwrap());
+    v.extend_from_slice(&bincode::serialize(&pkg).unwrap());
+
+    Ok(hex::encode(v))
+}
+
+#[wasm_bindgen]
+pub fn get_auth_payload_round2(session_id: &str, from_id_hex: &str, to_id_hex: &str, eph_pub_hex: &str, nonce_hex: &str, ct_hex: &str) -> Result<String, JsError> {
+    let from_id: frost::Identifier = bincode::deserialize(&hex::decode(from_id_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let to_id: frost::Identifier = bincode::deserialize(&hex::decode(to_id_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let eph_pub_bytes = hex::decode(eph_pub_hex).map_err(|e| JsError::new(&e.to_string()))?;
+    let nonce_bytes = hex::decode(nonce_hex).map_err(|e| JsError::new(&e.to_string()))?;
+    let ct_bytes = hex::decode(ct_hex).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let mut v = b"TOKAMAK_FROST_DKG_R2|".to_vec();
+    v.extend_from_slice(session_id.as_bytes());
+    v.extend_from_slice(b"|");
+    v.extend_from_slice(&bincode::serialize(&from_id).unwrap());
+    v.extend_from_slice(&bincode::serialize(&to_id).unwrap());
+    v.extend_from_slice(&eph_pub_bytes);
+    v.extend_from_slice(&nonce_bytes);
+    v.extend_from_slice(&ct_bytes);
+
+    Ok(hex::encode(v))
+}
+
+#[wasm_bindgen]
+pub fn get_auth_payload_finalize(session_id: &str, id_hex: &str, group_vk_hex: &str) -> Result<String, JsError> {
+    let id: frost::Identifier = bincode::deserialize(&hex::decode(id_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let group_vk_bytes = hex::decode(group_vk_hex).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let mut v = b"TOKAMAK_FROST_DKG_FIN|".to_vec();
+    v.extend_from_slice(session_id.as_bytes());
+    v.extend_from_slice(b"|");
+    v.extend_from_slice(&bincode::serialize(&id).unwrap());
+    v.extend_from_slice(&group_vk_bytes);
+
+    Ok(hex::encode(v))
 }
 
 // ====================================================================
@@ -66,8 +128,7 @@ pub fn get_identifier_hex(id: u16) -> Result<String, JsError> {
 #[wasm_bindgen]
 pub fn dkg_part1(identifier_hex: &str, max_signers: u16, min_signers: u16) -> Result<String, JsError> {
     let identifier_bytes = hex::decode(identifier_hex).map_err(|e| JsError::new(&e.to_string()))?;
-    // Ensure we have exactly 32 bytes before trying to deserialize.
-    let identifier_array: [u8; 32] = identifier_bytes.try_into().map_err(|_| JsError::new("Identifier hex must represent 32 bytes"))?;
+    let identifier_array: [u8; 32] = identifier_bytes.try_into().map_err(|_| JsError::new("Identifier hex must be 32 bytes"))?;
     let identifier = frost::Identifier::deserialize(&identifier_array).map_err(|e| JsError::new(&e.to_string()))?;
 
     let (secret_pkg, public_pkg) = frost::keys::dkg::part1(identifier, max_signers, min_signers, &mut OsRng).map_err(|e| JsError::new(&e.to_string()))?;
