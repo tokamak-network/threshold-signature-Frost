@@ -8,6 +8,7 @@
     --error-color: #dc3545;
     --info-color: #6c757d;
     --data-color: #4a4a4a; /* Color for data logs */
+    --metamask-color: #f6851b;
 }
 
 .App {
@@ -17,15 +18,39 @@
     padding: 1rem;
 }
 
-header h1 {
+.App-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.App-header h1 {
+    color: var(--text-color);
+    margin: 0;
+}
+
+.wallet-switch-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.wallet-address {
+    font-weight: bold;
+    background-color: #e9ecef;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
     color: var(--text-color);
 }
 
 .grid-container {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
     gap: 1.5rem;
-    max-width: 1400px;
+    max-width: 1500px;
     margin: 0 auto;
 }
 
@@ -44,6 +69,22 @@ header h1 {
     border-bottom: 2px solid var(--primary-color);
     padding-bottom: 0.5rem;
     margin-bottom: 1rem;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid var(--primary-color);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.panel-header h2 {
+    margin: 0;
+    border: none;
+    padding: 0;
+    color: var(--primary-color);
 }
 
 .form-group {
@@ -77,12 +118,23 @@ button {
     background-color: var(--primary-color);
     color: white;
     border: none;
-    padding: 0.75rem 1.5rem;
+    padding: 0.5rem 1rem; /* Smaller button padding */
     border-radius: 4px;
     cursor: pointer;
-    font-size: 1rem;
+    font-size: 0.9rem; /* Smaller font size */
     transition: background-color 0.2s;
     margin-right: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.key-buttons-container {
+    display: flex;
+    justify-content: flex-start;
+    gap: 10px; /* Space between buttons */
+}
+
+.key-buttons-container button {
+    flex-grow: 1; /* Allow buttons to grow and fill space */
 }
 
 button:disabled {
@@ -104,12 +156,28 @@ button:hover:not(:disabled) {
 
 .clear-logs-button {
     background-color: var(--info-color);
-    padding: 0.25rem 0.75rem; /* Make it smaller */
+    padding: 0.25rem 0.75rem;
     font-size: 0.8rem;
 }
 
 .clear-logs-button:hover:not(:disabled) {
     background-color: #5a6268;
+}
+
+.metamask-button {
+    background-color: var(--metamask-color);
+}
+
+.metamask-button:hover:not(:disabled) {
+    background-color: #e7730d;
+}
+
+.generate-button {
+    background-color: var(--error-color);
+}
+
+.generate-button:hover:not(:disabled) {
+    background-color: #c82333;
 }
 
 .success-text {
@@ -122,20 +190,17 @@ button:hover:not(:disabled) {
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 1rem;
 }
 
 .toggle-switch span {
-    margin: 0 0.5rem;
-    font-weight: bold;
     color: var(--text-color);
 }
 
 .switch {
     position: relative;
     display: inline-block;
-    width: 60px;
-    height: 34px;
+    width: 50px;
+    height: 28px;
 }
 
 .switch input { display: none; }
@@ -149,19 +214,17 @@ button:hover:not(:disabled) {
     bottom: 0;
     background-color: #ccc;
     transition: .4s;
-    border-radius: 34px;
 }
 
 .slider:before {
     position: absolute;
     content: "";
-    height: 26px;
-    width: 26px;
+    height: 20px;
+    width: 20px;
     left: 4px;
     bottom: 4px;
     background-color: white;
     transition: .4s;
-    border-radius: 50%;
 }
 
 input:checked + .slider {
@@ -169,7 +232,15 @@ input:checked + .slider {
 }
 
 input:checked + .slider:before {
-    transform: translateX(26px);
+    transform: translateX(22px);
+}
+
+.slider.round {
+  border-radius: 28px;
+}
+
+.slider.round:before {
+  border-radius: 50%;
 }
 
 /* Status Indicator */
@@ -220,6 +291,7 @@ input:checked + .slider:before {
 .log-panel-header h2 {
     margin: 0;
     border: none;
+    color: var(--primary-color);
 }
 
 .log-view {

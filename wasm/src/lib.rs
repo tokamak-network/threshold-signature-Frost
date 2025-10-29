@@ -39,6 +39,25 @@ pub fn generate_ecdsa_keypair() -> String {
 }
 
 #[wasm_bindgen]
+pub fn derive_key_from_signature(signature_hex: &str) -> Result<String, JsError> {
+    let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x")).map_err(|e| JsError::new(&e.to_string()))?;
+
+    // Use Keccak256 as a KDF to derive a private key from the signature
+    let mut hasher = Keccak256::new();
+    hasher.update(&sig_bytes);
+    let private_key_bytes = hasher.finalize();
+
+    let sk = K256SecretKey::from_slice(&private_key_bytes).map_err(|e| JsError::new(&e.to_string()))?;
+    let pk = sk.public_key();
+
+    let response = serde_json::json!({
+        "private_key_hex": hex::encode(sk.to_bytes()),
+        "public_key_hex": hex::encode(pk.to_sec1_bytes()),
+    });
+    Ok(response.to_string())
+}
+
+#[wasm_bindgen]
 pub fn sign_challenge(private_key_hex: &str, challenge: &str) -> Result<String, JsError> {
     let sk_bytes = hex::decode(private_key_hex).map_err(|e| JsError::new(&e.to_string()))?;
     let sk = K256SecretKey::from_slice(&sk_bytes).map_err(|e| JsError::new(&e.to_string()))?;
