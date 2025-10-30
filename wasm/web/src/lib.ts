@@ -57,6 +57,7 @@ interface StateSetters {
     setIsServerConnected: React.Dispatch<React.SetStateAction<boolean>>;
     setFinalShare: React.Dispatch<React.SetStateAction<string>>;
     setFinalGroupKey: React.Dispatch<React.SetStateAction<string>>;
+    setJoiningSessionId: React.Dispatch<React.SetStateAction<string | null>>;
 }
 
 export const handleServerMessage = async (
@@ -249,11 +250,13 @@ export const handleServerMessage = async (
 
         case 'Finalized':
             log('success', `Server confirmed finalization. Group Key: ${msg.payload.group_vk_sec1_hex}`);
+            setters.setJoiningSessionId(null);
             break;
 
         case 'Error':
             log('error', `Server error: ${msg.payload.message}`);
             setters.setDkgStatus('Failed');
+            setters.setJoiningSessionId(null);
             break;
 
         default:

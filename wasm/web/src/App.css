@@ -1,14 +1,42 @@
 :root {
+    /* Base & Text */
     --background-color: #f0f2f5;
     --panel-background: #ffffff;
+    --text-color: #333333;
+    --text-color-light: #6c757d;
+
+    /* Borders & Dividers */
     --border-color: #d9d9d9;
-    --text-color: #333;
+    --subtle-border-color: #eeeeee;
+
+    /* Interactive Colors */
     --primary-color: #007bff;
-    --success-color: #28a745;
+    --primary-hover-color: #0056b3;
     --error-color: #dc3545;
+    --error-hover-color: #c82333;
     --info-color: #6c757d;
-    --data-color: #4a4a4a; /* Color for data logs */
+    --info-hover-color: #5a6268;
     --metamask-color: #f6851b;
+    --metamask-hover-color: #e7730d;
+    --disabled-color: #a0a0a0;
+
+    /* Status & Highlights */
+    --success-color: #28a745;
+    --subtle-background: #f8f9fa;
+    --highlight-background: #e9ecef;
+    --warning-background: #fffbe6;
+    --warning-border: #ffe58f;
+    --warning-text: #8a6d3b;
+    --data-color: #4a4a4a;
+
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
 }
 
 .App {
@@ -23,13 +51,14 @@
     justify-content: space-between;
     align-items: center;
     padding-bottom: 1rem;
-    margin-bottom: 1rem;
+    margin-bottom: 1.5rem;
     border-bottom: 1px solid var(--border-color);
 }
 
 .App-header h1 {
     color: var(--text-color);
     margin: 0;
+    font-size: 1.5rem;
 }
 
 .wallet-switch-container {
@@ -40,7 +69,7 @@
 
 .wallet-address {
     font-weight: bold;
-    background-color: #e9ecef;
+    background-color: var(--highlight-background);
     padding: 0.5rem 1rem;
     border-radius: 4px;
     color: var(--text-color);
@@ -49,9 +78,9 @@
 .grid-container {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
-    gap: 1.5rem;
-    max-width: 1500px;
-    margin: 0 auto;
+    gap: 3rem; /* Increased gap for more separation */
+    max-width: 1800px;
+    margin-inline: auto;
 }
 
 .panel {
@@ -60,15 +89,20 @@
     border-radius: 8px;
     padding: 1.5rem;
     text-align: left;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    box-shadow: 0 2px 4px rgb(0 0 0 / 0.05);
 }
 
+/* General styles for all h2/h3 titles in panels */
 .panel h2, .panel h3 {
     margin-top: 0;
+    margin-bottom: 1rem;
     color: var(--primary-color);
+}
+
+/* Titles that are direct children of a panel get a border */
+.panel > h2, .panel > h3 {
     border-bottom: 2px solid var(--primary-color);
     padding-bottom: 0.5rem;
-    margin-bottom: 1rem;
 }
 
 .panel-header {
@@ -80,11 +114,11 @@
     margin-bottom: 1rem;
 }
 
+/* Titles inside a panel-header have their border/margin handled by the header */
 .panel-header h2 {
-    margin: 0;
     border: none;
     padding: 0;
-    color: var(--primary-color);
+    margin: 0;
 }
 
 .form-group {
@@ -97,6 +131,17 @@
     font-weight: bold;
     color: var(--text-color);
 }
+.toggle-switch {
+    display: inline-flex;      /* or flex */
+    align-items: center;
+    gap: 16px;                 /* tweak to taste */
+}
+/* Space between "Join Session" and the toggle */
+.toggle-switch > span:first-child {
+    display: inline-block;
+    margin-right: 16px; /* tweak to taste */
+}
+
 
 input[type="text"],
 input[type="password"],
@@ -106,7 +151,6 @@ textarea {
     padding: 0.5rem;
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    box-sizing: border-box;
 }
 
 textarea {
@@ -114,36 +158,41 @@ textarea {
     font-family: monospace;
 }
 
+input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
 button {
-    background-color: var(--primary-color);
-    color: white;
+    background: var(--primary-color);
+    color: #ffffff;
     border: none;
-    padding: 0.5rem 1rem; /* Smaller button padding */
+    padding: 0.5rem 1rem;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 0.9rem; /* Smaller font size */
+    font-size: 0.9rem;
     transition: background-color 0.2s;
-    margin-right: 0.5rem;
+    margin-inline-end: 0.5rem;
     margin-top: 0.5rem;
 }
 
 .key-buttons-container {
     display: flex;
     justify-content: flex-start;
-    gap: 10px; /* Space between buttons */
+    gap: 10px;
 }
 
 .key-buttons-container button {
-    flex-grow: 1; /* Allow buttons to grow and fill space */
+    flex-grow: 1;
 }
 
 button:disabled {
-    background-color: #a0a0a0;
+    background-color: var(--disabled-color);
     cursor: not-allowed;
 }
 
 button:hover:not(:disabled) {
-    background-color: #0056b3;
+    background-color: var(--primary-hover-color);
 }
 
 .disconnect-button {
@@ -151,17 +200,15 @@ button:hover:not(:disabled) {
 }
 
 .disconnect-button:hover:not(:disabled) {
-    background-color: #c82333;
+    background-color: var(--error-hover-color);
 }
 
 .clear-logs-button {
     background-color: var(--info-color);
-    padding: 0.25rem 0.75rem;
-    font-size: 0.8rem;
 }
 
 .clear-logs-button:hover:not(:disabled) {
-    background-color: #5a6268;
+    background-color: var(--info-hover-color);
 }
 
 .metamask-button {
@@ -169,7 +216,7 @@ button:hover:not(:disabled) {
 }
 
 .metamask-button:hover:not(:disabled) {
-    background-color: #e7730d;
+    background-color: var(--metamask-hover-color);
 }
 
 .generate-button {
@@ -177,7 +224,7 @@ button:hover:not(:disabled) {
 }
 
 .generate-button:hover:not(:disabled) {
-    background-color: #c82333;
+    background-color: var(--error-hover-color);
 }
 
 .success-text {
@@ -190,6 +237,7 @@ button:hover:not(:disabled) {
     display: flex;
     align-items: center;
     justify-content: center;
+    margin-bottom: 1rem; /* Add margin for spacing */
 }
 
 .toggle-switch span {
@@ -208,11 +256,8 @@ button:hover:not(:disabled) {
 .slider {
     position: absolute;
     cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: #ccc;
+    inset: 0;
+    background-color: var(--border-color);
     transition: .4s;
 }
 
@@ -223,7 +268,7 @@ button:hover:not(:disabled) {
     width: 20px;
     left: 4px;
     bottom: 4px;
-    background-color: white;
+    background-color: var(--panel-background);
     transition: .4s;
 }
 
@@ -259,7 +304,7 @@ input:checked + .slider:before {
     width: 20px;
     height: 20px;
     border-radius: 50%;
-    background-color: #ccc;
+    background-color: var(--border-color);
     margin-right: 10px;
     transition: background-color 0.5s;
 }
@@ -297,7 +342,7 @@ input:checked + .slider:before {
 .log-view {
     height: 200px;
     overflow-y: auto;
-    background-color: #f8f9fa;
+    background-color: var(--subtle-background);
     border: 1px solid var(--border-color);
     border-radius: 4px;
     padding: 1rem;
@@ -308,18 +353,18 @@ input:checked + .slider:before {
 .log-view p {
     margin: 0;
     padding: 0.2rem 0;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid var(--subtle-border-color);
 }
 
 .log-view .info { color: var(--info-color); }
 .log-view .success { color: var(--success-color); }
 .log-view .error { color: var(--error-color); }
-.log-view .data { color: var(--data-color); font-style: italic; }
+.log-view .data { color: var(--data-color); }
 
 .session-id-display {
     margin-top: 1rem;
     padding: 1rem;
-    background-color: #e9ecef;
+    background-color: var(--highlight-background);
     border-radius: 4px;
 }
 
@@ -336,10 +381,10 @@ input:checked + .slider:before {
 .join-status {
     margin-top: 1rem;
     padding: 1rem;
-    background-color: #fffbe6;
-    border: 1px solid #ffe58f;
+    background-color: var(--warning-background);
+    border: 1px solid var(--warning-border);
     border-radius: 4px;
-    color: #8a6d3b;
+    color: var(--warning-text);
     font-weight: bold;
 }
 
@@ -367,7 +412,7 @@ input:checked + .slider:before {
 }
 
 .participant-table th, .roster-input-table th, .sessions-table th {
-    background-color: #f8f9fa;
+    background-color: var(--subtle-background);
     font-weight: bold;
 }
 

@@ -54,6 +54,7 @@ function App() {
     const [totalParticipants, setTotalParticipants] = useState(0);
     const [joinedParticipants, setJoinedParticipants] = useState<Participant[]>([]);
     const [pendingSessions, setPendingSessions] = useState<PendingDKGSession[]>([]);
+    const [joiningSessionId, setJoiningSessionId] = useState<string | null>(null);
 
     // --- State for Logs & Results ---
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -167,7 +168,8 @@ function App() {
                 setJoinedParticipants,
                 setIsServerConnected,
                 setFinalShare,
-                setFinalGroupKey
+                setFinalGroupKey,
+                setJoiningSessionId
             }, log, ws);
         };
 
@@ -185,6 +187,7 @@ function App() {
             setTotalParticipants(0);
             setJoinedParticipants([]);
             setPendingSessions([]);
+            setJoiningSessionId(null);
         };
     };
 
@@ -247,6 +250,7 @@ function App() {
     const handleJoinSession = (sessionToJoin: string) => {
         setFinalShare('');
         setFinalGroupKey('');
+        setJoiningSessionId(sessionToJoin);
         log('info', `Joining session ${sessionToJoin}...`);
         sessionIdRef.current = sessionToJoin;
         sendMessage(ws.current, { type: 'JoinSession', payload: { session: sessionToJoin } }, log);
@@ -258,11 +262,11 @@ function App() {
         <div className="App">
             <header className="App-header">
                 <h1>Tokamak-FROST DKG Web Client</h1>
-                <WalletSwitch 
-                    isConnected={isMetaMaskConnected} 
-                    address={address} 
-                    onConnect={handleMetaMaskToggle} 
-                    onDisconnect={handleMetaMaskToggle} 
+                <WalletSwitch
+                    isConnected={isMetaMaskConnected}
+                    address={address}
+                    onConnect={handleMetaMaskToggle}
+                    onDisconnect={handleMetaMaskToggle}
                 />
             </header>
 
@@ -278,8 +282,8 @@ function App() {
                         <label>Your Derived Public Key</label>
                         <input type="text" value={publicKey} onChange={e => setPublicKey(e.target.value)} disabled={isServerConnected} />
                     </div>
-                    <button 
-                        onClick={handleKeyGeneration} 
+                    <button
+                        onClick={handleKeyGeneration}
                         disabled={isServerConnected}
                         className={isMetaMaskConnected ? 'metamask-button' : 'generate-button'}
                     >
@@ -305,14 +309,14 @@ function App() {
                 <div className="panel">
                     <div className="panel-header">
                         <h2>2. DKG Session</h2>
-                        <div className="toggle-switch">
-                            <span>Join Session</span>
-                            <label className="switch">
-                                <input type="checkbox" checked={isCreator} onChange={() => setIsCreator(!isCreator)} disabled={isServerConnected} />
-                                <span className="slider round"></span>
-                            </label>
-                            <span>Create Session</span>
-                        </div>
+                    </div>
+                    <div className="toggle-switch">
+                        <span>Join Session</span>
+                        <label className="switch">
+                            <input type="checkbox" checked={isCreator} onChange={() => setIsCreator(!isCreator)} disabled={isServerConnected} />
+                            <span className="slider round"></span>
+                        </label>
+                        <span>Create Session</span>
                     </div>
 
                     {isCreator ? (
@@ -370,7 +374,7 @@ function App() {
                                                 <td><code>{s.session}</code></td>
                                                 <td>{s.group_id}</td>
                                                 <td>{s.joined.length} / {s.max_signers}</td>
-                                                <td><button onClick={() => handleJoinSession(s.session)}>Join</button></td>
+                                                <td><button onClick={() => handleJoinSession(s.session)} disabled={joiningSessionId === s.session}>Join</button></td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -385,7 +389,7 @@ function App() {
                             <code>{sessionId}</code>
                         </div>
                     )}
-                    
+
                     {totalParticipants > 0 && (
                         <div className="join-status">
                             <p>Participants Joined: {joinedCount} / {totalParticipants}</p>
