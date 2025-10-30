@@ -1,0 +1,440 @@
+:root {
+    /* Base & Text */
+    --background-color: #f0f2f5;
+    --panel-background: #ffffff;
+    --text-color: #333333;
+    --text-color-light: #6c757d;
+
+    /* Borders & Dividers */
+    --border-color: #d9d9d9;
+    --subtle-border-color: #eeeeee;
+
+    /* Interactive Colors */
+    --primary-color: #007bff;
+    --primary-hover-color: #0056b3;
+    --error-color: #dc3545;
+    --error-hover-color: #c82333;
+    --info-color: #6c757d;
+    --info-hover-color: #5a6268;
+    --metamask-color: #f6851b;
+    --metamask-hover-color: #e7730d;
+    --disabled-color: #a0a0a0;
+
+    /* Status & Highlights */
+    --success-color: #28a745;
+    --subtle-background: #f8f9fa;
+    --highlight-background: #e9ecef;
+    --warning-background: #fffbe6;
+    --warning-border: #ffe58f;
+    --warning-text: #8a6d3b;
+    --data-color: #4a4a4a;
+
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+.App {
+    text-align: center;
+    background-color: var(--background-color);
+    min-height: 100vh;
+    padding: 1rem;
+}
+
+.App-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.App-header h1 {
+    color: var(--text-color);
+    margin: 0;
+    font-size: 1.5rem;
+}
+
+.wallet-switch-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.wallet-address {
+    font-weight: bold;
+    background-color: var(--highlight-background);
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    color: var(--text-color);
+}
+
+.grid-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+    gap: 3rem; /* Increased gap for more separation */
+    max-width: 1800px;
+    margin-inline: auto;
+}
+
+.panel {
+    background-color: var(--panel-background);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1.5rem;
+    text-align: left;
+    box-shadow: 0 2px 4px rgb(0 0 0 / 0.05);
+}
+
+/* General styles for all h2/h3 titles in panels */
+.panel h2, .panel h3 {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    color: var(--primary-color);
+}
+
+/* Titles that are direct children of a panel get a border */
+.panel > h2, .panel > h3 {
+    border-bottom: 2px solid var(--primary-color);
+    padding-bottom: 0.5rem;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid var(--primary-color);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+/* Titles inside a panel-header have their border/margin handled by the header */
+.panel-header h2 {
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: bold;
+    color: var(--text-color);
+}
+.toggle-switch {
+    display: inline-flex;      /* or flex */
+    align-items: center;
+    gap: 16px;                 /* tweak to taste */
+}
+/* Space between "Join Session" and the toggle */
+.toggle-switch > span:first-child {
+    display: inline-block;
+    margin-right: 16px; /* tweak to taste */
+}
+
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+textarea {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
+textarea {
+    resize: vertical;
+    font-family: monospace;
+}
+
+input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+button {
+    background: var(--primary-color);
+    color: #ffffff;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background-color 0.2s;
+    margin-inline-end: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.key-buttons-container {
+    display: flex;
+    justify-content: flex-start;
+    gap: 10px;
+}
+
+.key-buttons-container button {
+    flex-grow: 1;
+}
+
+button:disabled {
+    background-color: var(--disabled-color);
+    cursor: not-allowed;
+}
+
+button:hover:not(:disabled) {
+    background-color: var(--primary-hover-color);
+}
+
+.disconnect-button {
+    background-color: var(--error-color);
+}
+
+.disconnect-button:hover:not(:disabled) {
+    background-color: var(--error-hover-color);
+}
+
+.clear-logs-button {
+    background-color: var(--info-color);
+}
+
+.clear-logs-button:hover:not(:disabled) {
+    background-color: var(--info-hover-color);
+}
+
+.metamask-button {
+    background-color: var(--metamask-color);
+}
+
+.metamask-button:hover:not(:disabled) {
+    background-color: var(--metamask-hover-color);
+}
+
+.generate-button {
+    background-color: var(--error-color);
+}
+
+.generate-button:hover:not(:disabled) {
+    background-color: var(--error-hover-color);
+}
+
+.success-text {
+    color: var(--success-color);
+    font-weight: bold;
+}
+
+/* Toggle Switch */
+.toggle-switch {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 1rem; /* Add margin for spacing */
+}
+
+.toggle-switch span {
+    color: var(--text-color);
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 50px;
+    height: 28px;
+}
+
+.switch input { display: none; }
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background-color: var(--border-color);
+    transition: .4s;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 4px;
+    bottom: 4px;
+    background-color: var(--panel-background);
+    transition: .4s;
+}
+
+input:checked + .slider {
+    background-color: var(--primary-color);
+}
+
+input:checked + .slider:before {
+    transform: translateX(22px);
+}
+
+.slider.round {
+  border-radius: 28px;
+}
+
+.slider.round:before {
+  border-radius: 50%;
+}
+
+/* Status Indicator */
+.status-indicator {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.status-indicator span {
+    color: var(--text-color);
+    font-weight: bold;
+}
+
+.light {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background-color: var(--border-color);
+    margin-right: 10px;
+    transition: background-color 0.5s;
+}
+
+.light.active {
+    background-color: var(--success-color);
+    box-shadow: 0 0 10px var(--success-color);
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { box-shadow: 0 0 5px var(--success-color); }
+    50% { box-shadow: 0 0 15px var(--success-color); }
+    100% { box-shadow: 0 0 5px var(--success-color); }
+}
+
+/* Log Panel */
+.log-panel {
+    grid-column: 1 / -1; /* Span full width */
+}
+
+.log-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.log-panel-header h2 {
+    margin: 0;
+    border: none;
+    color: var(--primary-color);
+}
+
+.log-view {
+    height: 200px;
+    overflow-y: auto;
+    background-color: var(--subtle-background);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 1rem;
+    font-family: monospace;
+    font-size: 0.9rem;
+}
+
+.log-view p {
+    margin: 0;
+    padding: 0.2rem 0;
+    border-bottom: 1px solid var(--subtle-border-color);
+}
+
+.log-view .info { color: var(--info-color); }
+.log-view .success { color: var(--success-color); }
+.log-view .error { color: var(--error-color); }
+.log-view .data { color: var(--data-color); }
+
+.session-id-display {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: var(--highlight-background);
+    border-radius: 4px;
+}
+
+.session-id-display p {
+    color: var(--text-color);
+    margin-top: 0;
+}
+
+.session-id-display code {
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.join-status {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: var(--warning-background);
+    border: 1px solid var(--warning-border);
+    border-radius: 4px;
+    color: var(--warning-text);
+    font-weight: bold;
+}
+
+.participant-list {
+    margin-top: 1rem;
+}
+
+.participant-list h4 {
+    color: var(--text-color);
+    margin-bottom: 0.5rem;
+}
+
+.participant-table, .roster-input-table, .sessions-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin-top: 1rem;
+}
+
+.participant-table th, .participant-table td, .roster-input-table th, .roster-input-table td, .sessions-table th, .sessions-table td {
+    border: 1px solid var(--border-color);
+    padding: 0.5rem;
+    text-align: left;
+    color: var(--text-color);
+}
+
+.participant-table th, .roster-input-table th, .sessions-table th {
+    background-color: var(--subtle-background);
+    font-weight: bold;
+}
+
+.participant-table td:first-child, .roster-input-table td:first-child {
+    width: 50px;
+    text-align: center;
+}
+
+.roster-input-table input {
+    border: none;
+    padding: 0;
+    background: transparent;
+    color: var(--text-color);
+    width: 100%;
+}
+
+.participant-table code, .sessions-table code {
+    font-family: monospace;
+    color: var(--primary-color);
+    word-break: break-all;
+}
+
+.results-display {
+    margin-top: 1rem;
+}
