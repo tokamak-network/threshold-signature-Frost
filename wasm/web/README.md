@@ -13,18 +13,18 @@ It provides a user-friendly interface for creating and joining DKG sessions, der
   - **MetaMask Mode:** When the switch is on, users can derive a secure roster key by signing a fixed message (`"Tokamak-Frost-Seed V1"`).
   - **Local Mode:** When the switch is off, users can generate a new random key pair locally.
 - **Session Lobby:** Participants can see a list of pending DKG sessions available on the server, view their status, and join with a single click.
+- **Deterministic UID Generation:** The creator provides a list of participant public keys. The application automatically sorts these keys and assigns UIDs (`1, 2, 3,...`) based on that sorted order, ensuring all clients and the server derive the same UIDs for the same set of participants.
 - **Real-Time Feedback:**
   - A live log view streams all client-side actions and server messages, with a button to clear the view.
   - A status panel with animated indicators shows the current round of the DKG ceremony (Round 1, Round 2, Finalized).
   - A live-updating table shows which participants have successfully joined a session.
-- **Dynamic Roster Input:** The creator's UI features a dynamic table for entering participant UIDs and public keys, which automatically adjusts its size based on the "Max Players" input.
 - **Graceful Disconnection Handling:** The UI updates in real-time if a participant disconnects from a session, and users are provided with a "Disconnect" button.
 
 ## Technology Stack
 
 - **Frontend Framework:** React with TypeScript
 - **Build Tool:** Vite
-- **Web3 Integration:** `wagmi` for connecting to MetaMask and signing messages.
+- **Web3 Integration:** `wagmi` & `viem` for connecting to MetaMask and signing messages.
 - **Cryptography:** A Rust-based WASM module (`tokamak_frost_wasm`) handles all cryptographic operations, including key generation, signing, and the FROST DKG protocol logic.
 - **Communication:** Secure WebSockets for real-time communication with the `fserver`.
 
@@ -54,6 +54,8 @@ cd /path/to/tokamak-frost/wasm/web
 
 # Install dependencies (only needs to be done once)
 npm install
+# or
+yarn install
 
 # Run the development server
 npm run dev
@@ -75,14 +77,48 @@ This command will:
 
 The optimized static files will be placed in the `dist/` directory.
 
-## How to Use the Application
+## WebSocket Messaging Protocol
 
-1.  **Choose Key Mode:** Use the wallet switch in the top-right corner to select your key generation method.
-2.  **Derive/Generate Keys:**
-    - **If MetaMask is connected:** Click the orange **"Derive Roster Key"** button. You will be prompted to sign a message in MetaMask to deterministically generate your keys for the ceremony.
-    - **If not using MetaMask:** Click the red **"Generate New Random Keys"** button.
-3.  **Create or Join a Session:**
-    - **As a Creator:** Select the "Create Session" toggle, fill in the session parameters (Group ID, player count, and the participant roster), and click "Create Session & Connect".
-    - **As a Participant:** Select the "Join Session" toggle, connect to the server, and click "Refresh Sessions" to see a list of available DKG ceremonies. Click the "Join" button on the session you wish to enter.
-4.  **Run the DKG:** The ceremony will proceed automatically. The UI will provide real-time updates in the log view, participant list, and status indicators.
-5.  **View Results:** Upon successful completion, your final secret key share and the group's public key will be displayed in the "Status & Results" panel.
+This section details the WebSocket messages exchanged between the web client and the `fserver`.
+
+### Client to Server (Outgoing)
+
+- **`AnnounceSession`**: Sent by a creator to initiate a new DKG session.
+  - `payload`: `{ group_id: string, min_signers: number, max_signers: number, participants: number[], participants_pubs: [number, string][] }`
+- **`RequestChallenge`**: Sent by any client to request a unique challenge for login.
+- **`Login`**: Sent by a client after signing the challenge.
+  - `payload`: `{ challenge: string, pubkey_hex: string, signature_hex: string }`
+- **`ListPendingDKGSessions`**: Sent by a participant to get a list of available sessions to join.
+- **`JoinSession`**: Sent by a participant to join a specific session from the lobby.
+  - `payload`: `{ session: string }`
+- **`Round1Submit`**: Sent by each participant to submit their public DKG share for Round 1.
+  - `payload`: `{ session: string, id_hex: string, pkg_bincode_hex: string, sig_ecdsa_hex: string }`
+- **`Round2Submit`**: Sent by each participant to submit their encrypted shares for Round 2.
+  - `payload`: `{ session: string, id_hex: string, pkgs_cipher_hex: [string, string, string, string, string][] }`
+- **`FinalizeSubmit`**: Sent by each participant after successfully calculating their long-lived secret share.
+  - `payload`: `{ session: string, id_hex: string, group_vk_sec1_hex: string, sig_ecdsa_hex: string }`
+
+### Server to Client (Incoming)
+
+- **`SessionCreated`**: Sent to the creator after they successfully announce a new session.
+  - `payload`: `{ session: string }`
+- **`Challenge`**: Sent to a client in response to `RequestChallenge`.
+  - `payload`: `{ challenge: string }`
+- **`LoginOk`**: Sent to a client after a successful login.
+  - `payload`: `{ user_id: number, access_token: string }`
+- **`PendingDKGSessions`**: Sent to a participant in response to `ListPendingDKGSessions`.
+  - `payload`: `{ sessions: { session: string, group_id: string, min_signers: number, max_signers: number, participants: number[], joined: number[] }[] }`
+- **`Info`**: A general-purpose message used to provide feedback.
+  - `payload`: `{ message: string }` (e.g., `"user 2 joined..."`, `"user 1 disconnected..."`)
+- **`Error`**: Sent when an operation fails or a message is invalid.
+  - `payload`: `{ message: string }`
+- **`ReadyRound1`**: Broadcast to all participants when the session is full.
+  - `payload`: `{ session: string, id_hex: string, min_signers: number, max_signers: number, group_id: string, roster: [number, string, string][] }`
+- **`Round1All`**: Broadcast to all participants after everyone has submitted their Round 1 package.
+  - `payload`: `{ session: string, packages: [string, string, string][] }`
+- **`ReadyRound2`**: Broadcast to all participants after `Round1All` to signal the start of the next phase.
+  - `payload`: `{ session: string }`
+- **`Round2All`**: Sent to each participant with their specific encrypted shares after everyone has submitted for Round 2.
+  - `payload`: `{ session: string, packages: [string, string, string, string, string][] }`
+- **`Finalized`**: Broadcast to all participants after everyone has successfully submitted their finalization message.
+  - `payload`: `{ session: string, group_vk_sec1_hex: string }`

@@ -130,8 +130,8 @@ enum ClientMsg {
         min_signers: u16,
         max_signers: u16,
         group_id: String,
-        participants: Vec<u32>,
-        participants_pubs: Vec<(u32, String)>,
+        participants: Vec<u32>,                // session-local IDs (suid)
+        participants_pubs: Vec<(u32, String)>, // (suid, compressed-sec1-hex)
     },
     RequestChallenge,
     Login {
@@ -203,7 +203,8 @@ enum ServerMsg {
     Error { message: String },
     Info { message: String },
     Challenge { challenge: String },
-    LoginOk { user_id: u32, access_token: String },
+    // principal = compressed SEC1 hex of the user's long-term roster key
+    LoginOk { principal: String, access_token: String },
 
     /// Returned in response to ClientMsg::ListPendingDKGSessions
     PendingDKGSessions { sessions: Vec<PendingDKGSession> },
@@ -220,7 +221,7 @@ enum ServerMsg {
         min_signers: u16,
         max_signers: u16,
         group_id: String,
-        // (uid, id_hex, ecdsa_pub_sec1_hex)
+        // (suid, id_hex, ecdsa_pub_sec1_hex)
         roster: Vec<(u32, String, String)>,
     },
     Round1All {
@@ -244,7 +245,7 @@ enum ServerMsg {
         threshold: u16,
         participants: u16,
         msg_keccak32_hex: String,
-        // (uid, id_hex, ecdsa_pub_sec1_hex)
+        // (suid, id_hex, ecdsa_pub_sec1_hex)
         roster: Vec<(u32, String, String)>,
     },
     SignSigningPackage {
@@ -288,6 +289,8 @@ struct PendingSignSession {
 // ========================= Coordinator State =========================
 
 type Tx = mpsc::UnboundedSender<Message>;
+// Principal identity = compressed SEC1 ECDSA public key hex (canonical)
+type Principal = String;
 
 #[derive(Clone)]
 struct AppState {
@@ -296,14 +299,12 @@ struct AppState {
 }
 
 struct Inner {
-    // Canonical mapping of pubkey -> uid for all known participants.
-    roster: BTreeMap<EcdsaVerifyingKey, u32>,
-    // active connections by uid
-    conns: HashMap<u32, Tx>,
+    // active connections by principal
+    conns: HashMap<String, Tx>,
     // active challenges to prevent reuse
     challenges: HashSet<String>,
     // active tokens
-    active_tokens: HashMap<String, u32>, // token -> uid
+    active_tokens: HashMap<String, String>, // token -> principal
     // sessions
     sessions: HashMap<String, Session>,
     // signing sessions
@@ -315,9 +316,14 @@ struct Session {
     min_signers: u16,
     max_signers: u16,
     group_id: String,
-    // fixed list of user ids allowed
+    // fixed list of session-local user ids allowed
     participants: Vec<u32>,
-    // mapping user id -> frost Identifier (u16 1..=n)
+
+    // session-local identity maps
+    suid_to_principal: BTreeMap<u32, String>,
+    principal_to_suid: BTreeMap<String, u32>,
+
+    // mapping suid -> frost Identifier (u16 1..=n)
     idmap: HashMap<u32, frost::Identifier>,
     joined: HashSet<u32>,
 
@@ -333,7 +339,7 @@ struct Session {
     finalized_uids: HashSet<u32>,
     agreed_vk: Option<String>,
 
-    // ECDSA verifying keys for each uid
+    // ECDSA verifying keys for each suid
     ecdsa_pubs: BTreeMap<u32, EcdsaVerifyingKey>,
     // signatures we forward along with packages
     r1_sigs: BTreeMap<frost::Identifier, String>,
@@ -346,10 +352,15 @@ struct SignSession {
     group_id: String,
     threshold: u16,
     participants: Vec<u32>,
+
+    // session-local identity maps
+    suid_to_principal: BTreeMap<u32, String>,
+    principal_to_suid: BTreeMap<String, u32>,
+
     idmap: HashMap<u32, frost::Identifier>,
     joined: HashSet<u32>,
 
-    // ECDSA verifying keys for each uid
+    // ECDSA verifying keys for each suid
     ecdsa_pubs: BTreeMap<u32, EcdsaVerifyingKey>,
     // verifying shares from each participant
     vmap: BTreeMap<frost::Identifier, frost::keys::VerifyingShare>,
@@ -370,7 +381,6 @@ struct SignSession {
 impl Default for Inner {
     fn default() -> Self {
         Self {
-            roster: BTreeMap::new(),
             conns: HashMap::new(),
             challenges: HashSet::new(),
             active_tokens: HashMap::new(),
@@ -392,9 +402,11 @@ fn start_session_timeout(state: AppState, session: String, is_sign: bool) {
             if is_sign {
                 if let Some(sign_session) = inner.sign_sessions.remove(&session) {
                     let mut v = Vec::new();
-                    for uid in sign_session.participants {
-                        if let Some(tx) = inner.conns.get(&uid) {
-                            v.push(tx.clone());
+                    for suid in sign_session.participants {
+                        if let Some(principal) = sign_session.suid_to_principal.get(&suid) {
+                            if let Some(tx) = inner.conns.get(principal) {
+                                v.push(tx.clone());
+                            }
                         }
                     }
                     (v, "signing")
@@ -404,9 +416,11 @@ fn start_session_timeout(state: AppState, session: String, is_sign: bool) {
             } else {
                 if let Some(dkg_session) = inner.sessions.remove(&session) {
                     let mut v = Vec::new();
-                    for uid in dkg_session.participants {
-                        if let Some(tx) = inner.conns.get(&uid) {
-                            v.push(tx.clone());
+                    for suid in dkg_session.participants {
+                        if let Some(principal) = dkg_session.suid_to_principal.get(&suid) {
+                            if let Some(tx) = inner.conns.get(principal) {
+                                v.push(tx.clone());
+                            }
                         }
                     }
                     (v, "dkg")
@@ -422,7 +436,7 @@ fn start_session_timeout(state: AppState, session: String, is_sign: bool) {
                 serde_json::to_string(&ServerMsg::Error {
                     message: format!("{} session {} expired after 3 minutes", kind, session),
                 })
-                .unwrap(),
+                    .unwrap(),
             ));
             let _ = tx.send(Message::Close(None));
         }
@@ -497,13 +511,13 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     });
 
     // Session info
-    let mut session_uid: Option<u32> = None;
+    let mut principal_hex: Option<String> = None;
     let mut access_token: Option<String> = None;
 
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(txt) => {
-                if let Err(e) = handle_client_text(&state, &mut session_uid, &mut access_token, &tx, txt).await {
+                if let Err(e) = handle_client_text(&state, &mut principal_hex, &mut access_token, &tx, txt).await {
                     let _ = tx.send(Message::Text(
                         serde_json::to_string(&ServerMsg::Error { message: e.to_string() }).unwrap(),
                     ));
@@ -518,60 +532,69 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     }
 
     // Cleanup on disconnect + notify other participants
-    if let Some(uid) = session_uid {
+    if let Some(principal) = principal_hex {
         // Keep a copy of the token for removal after borrow
         let token_to_remove = access_token.clone();
 
-        // Collect {tx, message} pairs outside the mutex to avoid holding the lock while sending
-        let mut notify: Vec<(Tx, String)> = Vec::new();
+        // First collect (principal, message) pairs; then resolve to Tx; finally send outside the lock.
+        let mut notify_targets: Vec<(String, String)> = Vec::new();
+        let mut notify_txs: Vec<(Tx, String)> = Vec::new();
+
         {
             let mut inner = state.inner.lock().await;
 
-            // First collect (other_uid, msg) pairs while we mutably borrow sessions
-            let mut notify_targets: Vec<(u32, String)> = Vec::new();
-
-            // DKG sessions: if this user had joined, remove and prepare notifications
+            // DKG sessions
             for (_sid, s) in inner.sessions.iter_mut() {
-                if s.joined.remove(&uid) {
-                    let msg = format!(
-                        "Participant {} disconnected from DKG session {}",
-                        uid, s.session
-                    );
-                    for other_uid in s.participants.iter().copied().filter(|u| *u != uid) {
-                        notify_targets.push((other_uid, msg.clone()));
+                if let Some(&suid) = s.principal_to_suid.get(&principal) {
+                    if s.joined.remove(&suid) {
+                        let msg = format!(
+                            "Participant {} disconnected from DKG session {}",
+                            suid, s.session
+                        );
+                        for other_suid in s.participants.iter().copied().filter(|u| *u != suid) {
+                            if let Some(p) = s.suid_to_principal.get(&other_suid) {
+                                // collect the principal; don't touch inner.conns here
+                                notify_targets.push((p.clone(), msg.clone()));
+                            }
+                        }
                     }
                 }
             }
 
-            // Signing sessions: if this user had joined, remove and prepare notifications
+            // Signing sessions
             for (_sid, s) in inner.sign_sessions.iter_mut() {
-                if s.joined.remove(&uid) {
-                    let msg = format!(
-                        "Participant {} disconnected from signing session {}",
-                        uid, s.session
-                    );
-                    for other_uid in s.participants.iter().copied().filter(|u| *u != uid) {
-                        notify_targets.push((other_uid, msg.clone()));
+                if let Some(&suid) = s.principal_to_suid.get(&principal) {
+                    if s.joined.remove(&suid) {
+                        let msg = format!(
+                            "Participant {} disconnected from signing session {}",
+                            suid, s.session
+                        );
+                        for other_suid in s.participants.iter().copied().filter(|u| *u != suid) {
+                            if let Some(p) = s.suid_to_principal.get(&other_suid) {
+                                // collect the principal; don't touch inner.conns here
+                                notify_targets.push((p.clone(), msg.clone()));
+                            }
+                        }
                     }
                 }
             }
 
-            // Now resolve notify_targets to actual Tx senders after mutable borrows end
-            for (other_uid, text) in notify_targets {
-                if let Some(tx_other) = inner.conns.get(&other_uid) {
-                    notify.push((tx_other.clone(), text.clone()));
+            // Now resolve principals to Tx after the mutable borrows above have ended
+            for (p, msg) in notify_targets.iter() {
+                if let Some(tx_other) = inner.conns.get(p) {
+                    notify_txs.push((tx_other.clone(), msg.clone()));
                 }
             }
 
             // Remove connection and token
-            inner.conns.remove(&uid);
+            inner.conns.remove(&principal);
             if let Some(ref token) = token_to_remove {
                 inner.active_tokens.remove(token);
             }
         }
 
         // Send notifications after releasing the lock
-        for (tx_other, text) in notify {
+        for (tx_other, text) in notify_txs {
             let _ = tx_other.send(Message::Text(
                 serde_json::to_string(&ServerMsg::Info { message: text }).unwrap(),
             ));
@@ -581,7 +604,7 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
 
 async fn handle_client_text(
     state: &AppState,
-    session_uid: &mut Option<u32>,
+    principal_hex: &mut Option<String>,
     access_token: &mut Option<String>,
     tx: &Tx,
     txt: String,
@@ -602,36 +625,31 @@ async fn handle_client_text(
             // Generate unique session id
             let session = Uuid::new_v4().to_string();
 
-            // Populate server-wide roster and session-specific key map.
+            // Build session-local maps (suid <-> principal) and ECDSA pubkeys keyed by suid
             let mut session_ecdsa_pubs = BTreeMap::new();
-            for (p_uid, p_pk_hex) in &participants_pubs {
-                let p_pk_bytes = hex::decode(p_pk_hex).context("roster pubkey hex")?;
-                let p_vk = EcdsaVerifyingKey::from_sec1_bytes(&p_pk_bytes)
-                    .map_err(|_| anyhow!("bad ECDSA pub for uid {}", p_uid))?;
-
-                // Add to server-wide roster if not present, or verify consistency.
-                if let Some(existing_uid) = inner.roster.get(&p_vk) {
-                    if existing_uid != p_uid {
-                        return Err(anyhow!(
-                            "pubkey for uid {} is already registered with a different uid {}",
-                            p_uid, existing_uid
-                        ));
-                    }
-                } else {
-                    inner.roster.insert(p_vk.clone(), *p_uid);
+            let mut suid_to_principal = BTreeMap::new();
+            let mut principal_to_suid = BTreeMap::new();
+            for (suid, pk_hex) in &participants_pubs {
+                let pk_bytes = hex::decode(pk_hex).context("roster pubkey hex")?;
+                let vk = EcdsaVerifyingKey::from_sec1_bytes(&pk_bytes)
+                    .map_err(|_| anyhow!("bad ECDSA pub for suid {}", suid))?;
+                let principal = hex::encode(vk.to_encoded_point(true).as_bytes());
+                if principal_to_suid.insert(principal.clone(), *suid).is_some() {
+                    return Err(anyhow!("principal appears more than once in the session roster"));
                 }
-                session_ecdsa_pubs.insert(*p_uid, p_vk);
+                suid_to_principal.insert(*suid, principal);
+                session_ecdsa_pubs.insert(*suid, vk);
             }
 
             if !participants.iter().all(|u| session_ecdsa_pubs.contains_key(u)) {
-                return Err(anyhow!("participants_pubs must include all uids"));
+                return Err(anyhow!("participants_pubs must include all suids"));
             }
 
             // build id map 1..=n based on order
             let mut idmap = HashMap::new();
-            for (i, uid_i) in participants.iter().enumerate() {
+            for (i, suid) in participants.iter().enumerate() {
                 let fid: frost::Identifier = ((i + 1) as u16).try_into().unwrap();
-                idmap.insert(*uid_i, fid);
+                idmap.insert(*suid, fid);
             }
             let session_obj = Session {
                 session: session.clone(),
@@ -639,6 +657,8 @@ async fn handle_client_text(
                 max_signers,
                 group_id,
                 participants: participants.clone(),
+                suid_to_principal,
+                principal_to_suid,
                 idmap,
                 joined: HashSet::new(),
                 r1_pkgs: BTreeMap::new(),
@@ -684,42 +704,38 @@ async fn handle_client_text(
             vk.verify_digest(Keccak256::new().chain_update(challenge_bytes), &sig)
                 .map_err(|_| anyhow!("ECDSA signature verification failed"))?;
 
-            // Find the canonical UID from the roster based on the verified public key.
-            let uid = match inner.roster.get(&vk) {
-                Some(id) => *id,
-                None => return Err(anyhow!("public key not registered in any session roster")),
-            };
+            // Canonical principal = compressed SEC1 hex of verified key
+            let principal = hex::encode(vk.to_encoded_point(true).as_bytes());
 
             // Allow re-authentication by removing existing connection
-            if inner.conns.contains_key(&uid)
-            {
-                println!("[server] participant {} already logged in, allowing re-authentication", uid);
-                inner.conns.remove(&uid);
-                // Also clean up any existing tokens for this user
-                inner.active_tokens.retain(|_, token_uid| *token_uid != uid);
+            if inner.conns.contains_key(&principal) {
+                println!("[server] principal {} already logged in, allowing re-authentication", principal);
+                inner.conns.remove(&principal);
+                // Also clean up any existing tokens for this principal
+                inner.active_tokens.retain(|_, p| p != &principal);
             }
 
             let token = Uuid::new_v4().to_string();
-            inner.active_tokens.insert(token.clone(), uid);
+            inner.active_tokens.insert(token.clone(), principal.clone());
 
-            println!("[server] login successful for uid {}", uid);
-            inner.conns.insert(uid, tx.clone());
-            *session_uid = Some(uid);
+            println!("[server] login successful for principal {}", principal);
+            inner.conns.insert(principal.clone(), tx.clone());
+            *principal_hex = Some(principal.clone());
             *access_token = Some(token.clone());
 
             let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::LoginOk {
-                user_id: uid,
+                principal,
                 access_token: token,
             })?));
         }
         ClientMsg::Logout => {
-            if let Some(uid) = session_uid {
+            if let Some(principal) = principal_hex {
                 let mut inner = state.inner.lock().await;
-                inner.conns.remove(uid);
+                inner.conns.remove(principal);
                 if let Some(token) = access_token {
                     inner.active_tokens.remove(token);
                 }
-                *session_uid = None;
+                *principal_hex = None;
                 *access_token = None;
                 let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::Info {
                     message: "logged out".to_string(),
@@ -727,7 +743,7 @@ async fn handle_client_text(
             }
         }
         ClientMsg::JoinSession { session } => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
 
             // Variables to use after dropping borrow
@@ -739,30 +755,29 @@ async fn handle_client_text(
             let mut roster_vec = Vec::new();
 
             // New: collect notifications for other participants
-            let mut others_to_notify: Vec<Tx> = Vec::new();
+            let mut others_to_notify: Vec<String> = Vec::new();
             let join_msg: String;
-            // Collect UIDs first to avoid borrowing `inner` immutably while `s` is mutably borrowed
-            let mut other_uids: Vec<u32> = Vec::new();
 
             {
                 let s = inner
                     .sessions
                     .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown session"))?;
-                if !s.participants.contains(&uid) {
-                    return Err(anyhow!("participant not in allowed participants"));
-                }
-                s.joined.insert(uid);
+
+                let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in allowed participants"))?;
+                s.joined.insert(suid);
                 let joined_count = s.joined.len();
                 let total_count = s.participants.len();
 
                 // Prepare the join notification and collect recipients (excluding the joiner)
                 join_msg = format!(
                     "participant {} joined session {} ({}/{})",
-                    uid, s.session, joined_count, total_count
+                    suid, s.session, joined_count, total_count
                 );
-                for other_uid in s.participants.iter().copied().filter(|u| *u != uid) {
-                    other_uids.push(other_uid);
+                for other_suid in s.participants.iter().copied().filter(|u| *u != suid) {
+                    if let Some(p) = s.suid_to_principal.get(&other_suid) {
+                        others_to_notify.push(p.clone());
+                    }
                 }
 
                 if joined_count == total_count {
@@ -771,51 +786,55 @@ async fn handle_client_text(
                     group_label = s.group_id.clone();
                     min_s = s.min_signers;
                     max_s = s.max_signers;
-                    // build roster: (uid, id_hex, ecdsa_pub_sec1_hex)
+                    // build roster: (suid, id_hex, ecdsa_pub_sec1_hex)
                     let mut roster = Vec::new();
-                    for uid_i in &s.participants {
-                        let id_hex = hex::encode(bincode::serialize(&s.idmap[uid_i]).unwrap());
-                        let pk_hex = hex::encode(s.ecdsa_pubs[uid_i].to_encoded_point(true).as_bytes());
-                        roster.push((*uid_i, id_hex, pk_hex));
+                    for suid_i in &s.participants {
+                        let id_hex = hex::encode(bincode::serialize(&s.idmap[suid_i]).unwrap());
+                        let pk_hex = hex::encode(s.ecdsa_pubs[suid_i].to_encoded_point(true).as_bytes());
+                        roster.push((*suid_i, id_hex, pk_hex));
                     }
                     roster_vec = roster;
                 } else {
-                    // still inform the joiner of current progress
-                   /* let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::Info {
+                    // progress info broadcast to all in this session (collect principals from `s`)
+                    let info_msg = serde_json::to_string(&ServerMsg::Info {
                         message: format!("joined {}/{}", joined_count, total_count),
-                    })?));*/
-
-                    for uid_i in inner.sessions[&session].participants.clone() {
-                        if let Some(tx_i) = inner.conns.get(&uid_i) {
-                            let _ = tx_i.send(Message::Text(
-                                serde_json::to_string(&ServerMsg::Info { message: format!("joined {}/{}", joined_count, total_count) })?,
-                            ));
+                    })?;
+                    let recipients: Vec<String> = s
+                        .participants
+                        .iter()
+                        .filter_map(|u| s.suid_to_principal.get(u).cloned())
+                        .collect();
+                    for p in recipients {
+                        if let Some(tx_i) = inner.conns.get(&p) {
+                            let _ = tx_i.send(Message::Text(info_msg.clone()));
                         }
                     }
                 }
             }
 
-            // Now that the mutable borrow of `s` is dropped, we can read from `inner.conns`
-            for other_uid in other_uids {
-                if let Some(tx_other) = inner.conns.get(&other_uid) {
-                    others_to_notify.push(tx_other.clone());
+            // Send "join" Info to other connected participants in this session
+            for p in others_to_notify {
+                if let Some(tx_other) = inner.conns.get(&p) {
+                    let _ = tx_other.send(Message::Text(
+                        serde_json::to_string(&ServerMsg::Info { message: join_msg.clone() })?,
+                    ));
                 }
             }
 
-            // Send "join" Info to other connected participants in this session
-            for tx_other in others_to_notify {
-                let _ = tx_other.send(Message::Text(
-                    serde_json::to_string(&ServerMsg::Info { message: join_msg.clone() })?,
-                ));
-            }
-
-            // If everyone has joined, proceed with existing ReadyRound1 broadcast
+            // If everyone has joined, proceed with ReadyRound1 broadcast
             if notify_all {
-                for uid_i in inner.sessions[&session].participants.clone() {
-                    if let Some(tx_i) = inner.conns.get(&uid_i) {
-                        let id_hex_for = hex::encode(
-                            bincode::serialize(&inner.sessions[&session].idmap[&uid_i]).unwrap(),
-                        );
+                // each recipient gets its own id_hex
+                let recipients: Vec<String> = {
+                    let sref = inner.sessions.get(&session).unwrap();
+                    sref.participants.iter().filter_map(|suid| sref.suid_to_principal.get(suid).cloned()).collect()
+                };
+                for p in recipients {
+                    if let Some(tx_i) = inner.conns.get(&p) {
+                        let id_hex_for = {
+                            let sref = inner.sessions.get(&session).unwrap();
+                            let suid = sref.principal_to_suid[&p];
+                            hex::encode(bincode::serialize(&sref.idmap[&suid]).unwrap())
+                        };
                         let msg = ServerMsg::ReadyRound1 {
                             session: session_name.clone(),
                             id_hex: id_hex_for,
@@ -830,15 +849,14 @@ async fn handle_client_text(
             }
         }
         ClientMsg::ListPendingDKGSessions => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?;
 
             let sessions_payload: Vec<PendingDKGSession> = {
                 let inner = state.inner.lock().await;
                 inner
                     .sessions
                     .values()
-                    // Only sessions this user is a participant in and not fully finalized
-                    .filter(|s| s.participants.contains(&uid) && s.finalized_uids.len() < s.participants.len())
+                    .filter(|s| s.principal_to_suid.contains_key(principal) && s.finalized_uids.len() < s.participants.len())
                     .map(|s| PendingDKGSession {
                         session: s.session.clone(),
                         group_id: s.group_id.clone(),
@@ -856,15 +874,14 @@ async fn handle_client_text(
         }
 
         ClientMsg::ListPendingSigningSessions => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?;
 
             let sessions_payload: Vec<PendingSignSession> = {
                 let inner = state.inner.lock().await;
                 inner
                     .sign_sessions
                     .values()
-                    // Only sessions this user is a participant in and not yet fully joined
-                    .filter(|s| s.participants.contains(&uid) && s.joined.len() < s.participants.len())
+                    .filter(|s| s.principal_to_suid.contains_key(principal) && s.joined.len() < s.participants.len())
                     .map(|s| PendingSignSession {
                         session: s.session.clone(),
                         group_id: s.group_id.clone(),
@@ -880,40 +897,40 @@ async fn handle_client_text(
             ));
         }
         ClientMsg::Round1Submit { session, id_hex, pkg_bincode_hex, sig_ecdsa_hex } => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
 
             let packages: Vec<(String, String, String)>;
+            let recipients: Vec<String>;
+            let session_name: String;
 
             {
                 let s = inner
                     .sessions
                     .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown session"))?;
+
+                let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
                 let pkg: frost::keys::dkg::round1::Package =
                     bincode::deserialize(&hex::decode(&pkg_bincode_hex)?)?;
-                // Ensure the sender's session uid matches the declared FROST identifier
-                let expected_id = s.idmap.get(&uid).ok_or_else(|| anyhow!("no frost id for uid"))?;
+                let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no frost id for suid"))?;
                 if *expected_id != id {
-                    return Err(anyhow!("identifier/uid mismatch"));
+                    return Err(anyhow!("identifier/suid mismatch"));
                 }
-                // verify ECDSA
                 let payload = auth_payload_round1(&session, &id, &pkg);
                 let sig = parse_sig_hex(&sig_ecdsa_hex)?;
-                let vk = s.ecdsa_pubs.get(&uid).ok_or_else(|| anyhow!("no ECDSA vk for uid"))?;
+                let vk = s.ecdsa_pubs.get(&suid).ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
                 vk.verify_digest(Keccak256::new().chain_update(&payload), &sig)
                     .map_err(|_| anyhow!("ECDSA verify failed (round1)"))?;
                 s.r1_pkgs.insert(id, pkg);
                 s.r1_sigs.insert(id, sig_ecdsa_hex);
-                let have = s.r1_pkgs.len();
-                let need = s.participants.len();
-                println!("[server] R1 submit: have {have}/{need} (session={})", s.session);
                 if s.r1_pkgs.len() != s.participants.len() {
                     return Ok(());
                 }
-                let session_name = s.session.clone();
-                let recipients = s.participants.clone();
+
+                session_name = s.session.clone();
+                recipients = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
                 packages = s
                     .r1_pkgs
                     .iter()
@@ -926,37 +943,39 @@ async fn handle_client_text(
                         )
                     })
                     .collect();
-                println!(
-                    "[server] Broadcasting Round1All: {} packages (session={})",
-                    packages.len(),
-                    s.session
-                );
+            }
 
-                for uid_i in recipients {
-                    if let Some(tx_i) = inner.conns.get(&uid_i) {
-                        let msg = ServerMsg::Round1All { session: session_name.clone(), packages: packages.clone() };
-                        let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
-                        let _ = tx_i.send(Message::Text(serde_json::to_string(&ServerMsg::ReadyRound2 { session: session_name.clone() })?));
-                    }
+            println!(
+                "[server] Broadcasting Round1All: {} packages (session={})",
+                packages.len(),
+                session_name
+            );
+
+            for p in recipients {
+                if let Some(tx_i) = inner.conns.get(&p) {
+                    let msg = ServerMsg::Round1All { session: session_name.clone(), packages: packages.clone() };
+                    let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
+                    let _ = tx_i.send(Message::Text(serde_json::to_string(&ServerMsg::ReadyRound2 { session: session_name.clone() })?));
                 }
             }
         }
         ClientMsg::Round2Submit { session, id_hex, pkgs_cipher_hex } => {
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
-
+            // Stage targeted Round2 broadcasts to avoid E0502 (mutable borrow of session while reading inner.conns)
+            let mut dispatch_msgs: Vec<(String, ServerMsg)> = Vec::new();
             {
                 let s = inner
                     .sessions
                     .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown session"))?;
                 let from_id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
-                let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
-                // Ensure the sender's session uid matches the declared FROST identifier
-                let expected_id = s.idmap.get(&uid).ok_or_else(|| anyhow!("no frost id for uid"))?;
+                let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
+                let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no frost id for suid"))?;
                 if *expected_id != from_id {
-                    return Err(anyhow!("identifier/uid mismatch"));
+                    return Err(anyhow!("identifier/suid mismatch"));
                 }
-                let vk = s.ecdsa_pubs.get(&uid).ok_or_else(|| anyhow!("no ECDSA vk for uid"))?;
+                let vk = s.ecdsa_pubs.get(&suid).ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
                 // Insert each outgoing encrypted pkg into recipient inbox
                 for (rid_hex, eph_pub_hex, nonce_hex, ct_hex, sig_hex) in pkgs_cipher_hex {
                     let rid: frost::Identifier = bincode::deserialize(&hex::decode(&rid_hex)?)?;
@@ -980,10 +999,11 @@ async fn handle_client_text(
                 }
 
                 // Debug: show per-recipient inbox sizes so clients can see progress
-                for (uid_i, rid) in s.participants.iter().map(|uid_i| (*uid_i, s.idmap[uid_i])) {
+                for (suid_i, rid) in s.participants.iter().map(|suid_i| (*suid_i, s.idmap[suid_i])) {
                     let cur = s.r2_inbox.get(&rid).map(|m| m.len()).unwrap_or(0);
                     println!(
-                        "[server] R2 inbox for uid {uid_i} (rid={}): {}/?",
+                        "[server] R2 inbox for suid {} (rid={}): {}/?",
+                        suid_i,
                         hex::encode(bincode::serialize(&rid).unwrap()),
                         cur
                     );
@@ -1002,30 +1022,25 @@ async fn handle_client_text(
                     let recipients: Vec<(u32, frost::Identifier)> = s
                         .participants
                         .iter()
-                        .map(|uid_i| (*uid_i, s.idmap[uid_i]))
+                        .map(|suid_i| (*suid_i, s.idmap[suid_i]))
                         .collect();
                     println!(
-                        "[server] All R2 ready: dispatching targeted Round2All (session={})",
+                        "[server] All R2 ready: preparing targeted Round2All (session={})",
                         s.session
                     );
 
-                    // Targeted broadcast: each participant receives only the packages destined for them
-                    for (uid_i, rid) in recipients {
-                        if let Some(tx_i) = inner.conns.get(&uid_i) {
-                            if let Some(map_for_me) = inner
-                                .sessions
-                                .get(&session_name)
-                                .and_then(|s| s.r2_inbox.get(&rid))
-                            {
-                                let sigs_for_me = inner
-                                    .sessions
-                                    .get(&session_name)
-                                    .and_then(|s| s.r2_sigs.get(&rid))
+                    // Prepare messages while `s` is mutably borrowed; send after we drop `s`
+                    for (suid_i, rid) in recipients {
+                        if let Some(principal) = s.suid_to_principal.get(&suid_i) {
+                            if let Some(map_for_me) = s.r2_inbox.get(&rid) {
+                                let sigs_for_me = s
+                                    .r2_sigs
+                                    .get(&rid)
                                     .cloned()
                                     .unwrap_or_default();
                                 println!(
-                                    "[server] Sending R2 packages to uid {} (rid={}): {} entries",
-                                    uid_i,
+                                    "[server] Preparing R2 packages for suid {} (rid={}): {} entries",
+                                    suid_i,
                                     hex::encode(bincode::serialize(&rid).unwrap()),
                                     map_for_me.len()
                                 );
@@ -1043,15 +1058,22 @@ async fn handle_client_text(
                                     })
                                     .collect();
                                 let msg = ServerMsg::Round2All { session: session_name.clone(), packages };
-                                let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
+                                dispatch_msgs.push((principal.clone(), msg));
                             }
                         }
                     }
                 }
+                // Now it's safe to borrow `inner.conns` immutably and send messages
+                for (principal, msg) in dispatch_msgs {
+                    if let Some(tx_i) = inner.conns.get(&principal) {
+                        let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
+                    }
+                }
             }
+
         }
         ClientMsg::FinalizeSubmit { session, id_hex, group_vk_sec1_hex, sig_ecdsa_hex } => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
 
             {
@@ -1061,12 +1083,12 @@ async fn handle_client_text(
                     .ok_or_else(|| anyhow!("unknown session"))?;
                 // verify signed finalize
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
-                // Ensure the sender's session uid matches the declared FROST identifier
-                let expected_id = s.idmap.get(&uid).ok_or_else(|| anyhow!("no frost id for uid"))?;
+                let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
+                let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no frost id for suid"))?;
                 if *expected_id != id {
-                    return Err(anyhow!("identifier/uid mismatch"));
+                    return Err(anyhow!("identifier/suid mismatch"));
                 }
-                let vk = s.ecdsa_pubs.get(&uid).ok_or_else(|| anyhow!("no ECDSA vk for uid"))?;
+                let vk = s.ecdsa_pubs.get(&suid).ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
                 let vk_bytes = hex::decode(&group_vk_sec1_hex)?;
                 let payload = auth_payload_finalize(&session, &id, &vk_bytes);
                 let sig = parse_sig_hex(&sig_ecdsa_hex)?;
@@ -1077,8 +1099,8 @@ async fn handle_client_text(
                 if let Some(vk) = &s.agreed_vk {
                     if vk != &group_vk_sec1_hex {
                         println!(
-                            "[server] WARNING: finalize mismatch from uid {}: got {}, expected {}",
-                            uid, group_vk_sec1_hex, vk
+                            "[server] WARNING: finalize mismatch from suid {}: got {}, expected {}",
+                            suid, group_vk_sec1_hex, vk
                         );
                         return Err(anyhow!("group VK mismatch"));
                     }
@@ -1086,7 +1108,7 @@ async fn handle_client_text(
                     s.agreed_vk = Some(group_vk_sec1_hex.clone());
                 }
 
-                s.finalized_uids.insert(uid);
+                s.finalized_uids.insert(suid);
                 println!(
                     "[server] Finalize progress: {}/{} (session={})",
                     s.finalized_uids.len(),
@@ -1096,12 +1118,12 @@ async fn handle_client_text(
 
                 if s.finalized_uids.len() == s.participants.len() {
                     let session_name = s.session.clone();
-                    let recipients = s.participants.clone();
+                    let recipients: Vec<String> = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
                     let finalized_vk = s.agreed_vk.clone();
 
                     if let Some(vk) = finalized_vk {
-                        for uid_i in recipients {
-                            if let Some(tx_i) = inner.conns.get(&uid_i) {
+                        for p in recipients {
+                            if let Some(tx_i) = inner.conns.get(&p) {
                                 let msg = ServerMsg::Finalized { session: session_name.clone(), group_vk_sec1_hex: vk.clone() };
                                 let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
                             }
@@ -1119,25 +1141,27 @@ async fn handle_client_text(
 
             // Parse roster and build per-session map
             let mut session_ecdsa_pubs = BTreeMap::new();
-            for (uid, pk_hex) in &participants_pubs {
+            let mut suid_to_principal = BTreeMap::new();
+            let mut principal_to_suid = BTreeMap::new();
+            for (suid, pk_hex) in &participants_pubs {
                 let bytes = hex::decode(pk_hex).context("roster pubkey hex")?;
                 let vk = EcdsaVerifyingKey::from_sec1_bytes(&bytes)
-                    .map_err(|_| anyhow!("bad ECDSA pub for uid {}", uid))?;
-                if let Some(existing_uid) = inner.roster.get(&vk) {
-                    if existing_uid != uid { return Err(anyhow!("pubkey for uid {} already registered for {}", uid, existing_uid)); }
-                } else {
-                    inner.roster.insert(vk.clone(), *uid);
+                    .map_err(|_| anyhow!("bad ECDSA pub for suid {}", suid))?;
+                let principal = hex::encode(vk.to_encoded_point(true).as_bytes());
+                if principal_to_suid.insert(principal.clone(), *suid).is_some() {
+                    return Err(anyhow!("principal appears more than once in the signing session roster"));
                 }
-                session_ecdsa_pubs.insert(*uid, vk);
+                suid_to_principal.insert(*suid, principal);
+                session_ecdsa_pubs.insert(*suid, vk);
             }
             if !participants.iter().all(|u| session_ecdsa_pubs.contains_key(u)) {
-                return Err(anyhow!("participants_pubs must include all uids"));
+                return Err(anyhow!("participants_pubs must include all suids"));
             }
             // Assign identifiers 1..=n for the session; actual KeyPackage ids must match in Join
             let mut idmap = HashMap::new();
-            for (i, uid) in participants.iter().enumerate() {
+            for (i, suid) in participants.iter().enumerate() {
                 let fid: frost::Identifier = ((i + 1) as u16).try_into().unwrap();
-                idmap.insert(*uid, fid);
+                idmap.insert(*suid, fid);
             }
             // message digest (Keccak256)
             let msg_bytes = if let Some(h) = message_hex.strip_prefix("0x") { hex::decode(h)? } else { hex::decode(&message_hex)? };
@@ -1147,10 +1171,10 @@ async fn handle_client_text(
 
             // Build roster snapshot for clients
             let mut roster_vec = Vec::new();
-            for uid in &participants {
-                let id_hex = hex::encode(bincode::serialize(&idmap[uid]).unwrap());
-                let pk_hex = hex::encode(session_ecdsa_pubs[uid].to_encoded_point(true).as_bytes());
-                roster_vec.push((*uid, id_hex, pk_hex));
+            for suid in &participants {
+                let id_hex = hex::encode(bincode::serialize(&idmap[suid]).unwrap());
+                let pk_hex = hex::encode(session_ecdsa_pubs[suid].to_encoded_point(true).as_bytes());
+                roster_vec.push((*suid, id_hex, pk_hex));
             }
 
             let session = Uuid::new_v4().to_string();
@@ -1159,6 +1183,8 @@ async fn handle_client_text(
                 group_id: group_id.clone(),
                 threshold,
                 participants: participants.clone(),
+                suid_to_principal,
+                principal_to_suid,
                 idmap,
                 joined: HashSet::new(),
                 ecdsa_pubs: session_ecdsa_pubs,
@@ -1174,12 +1200,12 @@ async fn handle_client_text(
             start_session_timeout(state.clone(), session.clone(), true);
         }
         ClientMsg::JoinSignSession { session, signer_id_bincode_hex, verifying_share_bincode_hex } => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
 
             // Prepare broadcast data outside the mutable borrow scope
             let mut notify_all = false;
-            let mut recipients: Vec<u32> = Vec::new();
+            let mut recipients: Vec<String> = Vec::new();
             let mut msg_to_send: Option<ServerMsg> = None;
 
             {
@@ -1187,27 +1213,28 @@ async fn handle_client_text(
                     .sign_sessions
                     .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown signing session"))?;
-                if !s.participants.contains(&uid) {
-                    return Err(anyhow!("user not in allowed participants"));
+                if !s.principal_to_suid.contains_key(&principal) {
+                    return Err(anyhow!("principal not in allowed participants"));
                 }
                 // Parse id & verifying share
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&signer_id_bincode_hex)?)?;
-                // Ensure uid->id matches session idmap
-                if let Some(exp) = s.idmap.get(&uid) {
+                let suid = s.principal_to_suid[&principal];
+                // Ensure suid->id matches session idmap
+                if let Some(exp) = s.idmap.get(&suid) {
                     if *exp != id {
-                        return Err(anyhow!("identifier/uid mismatch in join"));
+                        return Err(anyhow!("identifier/suid mismatch in join"));
                     }
                 } else {
-                    s.idmap.insert(uid, id);
+                    s.idmap.insert(suid, id);
                 }
                 let vshare: frost::keys::VerifyingShare =
                     bincode::deserialize(&hex::decode(&verifying_share_bincode_hex)?)?;
                 s.vmap.insert(id, vshare);
-                s.joined.insert(uid);
+                s.joined.insert(suid);
 
                 if s.joined.len() == s.participants.len() {
                     notify_all = true;
-                    recipients = s.participants.clone();
+                    recipients = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
                     let msg32_hex = format!("0x{}", hex::encode(s.msg32));
                     msg_to_send = Some(ServerMsg::SignReadyRound1 {
                         session: s.session.clone(),
@@ -1226,8 +1253,8 @@ async fn handle_client_text(
 
             if notify_all {
                 if let Some(msg) = msg_to_send {
-                    for uid_i in recipients {
-                        if let Some(tx_i) = inner.conns.get(&uid_i) {
+                    for p in recipients {
+                        if let Some(tx_i) = inner.conns.get(&p) {
                             let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
                         }
                     }
@@ -1235,11 +1262,11 @@ async fn handle_client_text(
             }
         }
         ClientMsg::SignRound1Submit { session, id_hex, commitments_bincode_hex, sig_ecdsa_hex } => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
 
             // Collect broadcast data after mutation
-            let mut recipients: Vec<u32> = Vec::new();
+            let mut recipients: Vec<String> = Vec::new();
             let mut session_name = String::new();
             let mut sp_hex = String::new();
             let mut ready = false;
@@ -1250,14 +1277,15 @@ async fn handle_client_text(
                     .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown signing session"))?;
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
-                let expected_id = s.idmap.get(&uid).ok_or_else(|| anyhow!("no id for uid"))?;
+                let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
+                let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no id for suid"))?;
                 if *expected_id != id {
-                    return Err(anyhow!("identifier/uid mismatch"));
+                    return Err(anyhow!("identifier/suid mismatch"));
                 }
                 let vk = s
                     .ecdsa_pubs
-                    .get(&uid)
-                    .ok_or_else(|| anyhow!("no ECDSA vk for uid"))?;
+                    .get(&suid)
+                    .ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
                 let payload = auth_payload_sign_r1(&session, &s.group_id, &id_hex, &commitments_bincode_hex);
                 let sig = parse_sig_hex(&sig_ecdsa_hex)?;
                 vk.verify_digest(Keccak256::new().chain_update(&payload), &sig)
@@ -1269,15 +1297,15 @@ async fn handle_client_text(
                     // Build SigningPackage and prepare for broadcast
                     let sp = frost::SigningPackage::new(s.commitments.clone(), &s.msg32);
                     sp_hex = hex::encode(bincode::serialize(&sp)?);
-                    recipients = s.participants.clone();
+                    recipients = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
                     session_name = s.session.clone();
                     ready = true;
                 }
             }
 
             if ready {
-                for uid_i in recipients {
-                    if let Some(tx_i) = inner.conns.get(&uid_i) {
+                for p in recipients {
+                    if let Some(tx_i) = inner.conns.get(&p) {
                         let msg = ServerMsg::SignSigningPackage { session: session_name.clone(), signing_package_bincode_hex: sp_hex.clone() };
                         let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
                     }
@@ -1285,7 +1313,7 @@ async fn handle_client_text(
             }
         }
         ClientMsg::SignRound2Submit { session, id_hex, signature_share_bincode_hex, sig_ecdsa_hex } => {
-            let uid = session_uid.ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
             let mut inner = state.inner.lock().await;
 
             // Split borrow scopes, prepare aggregation and broadcast payloads
@@ -1303,21 +1331,22 @@ async fn handle_client_text(
             };
 
             // Will collect broadcast payloads here
-            let mut recipients: Vec<u32> = Vec::new();
+            let mut recipients: Vec<String> = Vec::new();
             let mut session_name = String::new();
             let mut final_fields: Option<(String, String, String, String, String, String)> = None; // (sig_hex, px, py, rx, ry, s)
 
             {
                 let s = inner.sign_sessions.get_mut(&session).unwrap();
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
-                let expected_id = s.idmap.get(&uid).ok_or_else(|| anyhow!("no id for uid"))?;
+                let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
+                let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no id for suid"))?;
                 if *expected_id != id {
-                    return Err(anyhow!("identifier/uid mismatch"));
+                    return Err(anyhow!("identifier/suid mismatch"));
                 }
                 let vk = s
                     .ecdsa_pubs
-                    .get(&uid)
-                    .ok_or_else(|| anyhow!("no ECDSA vk for uid"))?;
+                    .get(&suid)
+                    .ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
                 let payload = auth_payload_sign_r2(&session, &group_id, &id_hex, &signature_share_bincode_hex, &msg32_hex);
                 let sig = parse_sig_hex(&sig_ecdsa_hex)?;
                 vk.verify_digest(Keccak256::new().chain_update(&payload), &sig)
@@ -1348,15 +1377,15 @@ async fn handle_client_text(
                         let z_bytes = frost::Secp256K1ScalarField::serialize(sig_final.z());
                         format!("0x{}", hex::encode(z_bytes))
                     };
-                    recipients = s.participants.clone();
+                    recipients = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
                     session_name = s.session.clone();
                     final_fields = Some((sig_hex, px, py, rx, ry, s_field));
                 }
             }
 
             if let Some((sig_hex, px, py, rx, ry, s_field)) = final_fields {
-                for uid_i in recipients {
-                    if let Some(tx_i) = inner.conns.get(&uid_i) {
+                for p in recipients {
+                    if let Some(tx_i) = inner.conns.get(&p) {
                         let msg = ServerMsg::SignatureReady {
                             session: session_name.clone(),
                             signature_bincode_hex: sig_hex.clone(),

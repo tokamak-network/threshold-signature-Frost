@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
-import type { DkgStatus, LogEntry, Participant, PendingDKGSession, RosterEntry } from './types';
+import toast, { Toaster } from 'react-hot-toast';
+import type { DkgStatus, LogEntry, Participant, PendingDKGSession } from './types';
 import { handleServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from './lib';
 import init from '../../pkg/tokamak_frost_wasm.js';
 import './App.css';
@@ -19,6 +20,27 @@ const WalletSwitch = ({ isConnected, address, onConnect, onDisconnect }: { isCon
                 <input type="checkbox" checked={isConnected} onChange={isConnected ? onDisconnect : onConnect} />
                 <span className="slider round"></span>
             </label>
+        </div>
+    );
+};
+
+const ResultsModal = ({ show, onClose, groupPublicKey }: { show: boolean, onClose: () => void, groupPublicKey: string }) => {
+    if (!show) return null;
+
+    return (
+        <div className="modal-overlay">
+            <div className="modal-content">
+                <div className="success-animation">
+                    <svg className="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
+                        <circle className="checkmark__circle" cx="26" cy="26" r="25" fill="none" />
+                        <path className="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8" />
+                    </svg>
+                </div>
+                <h2>DKG Ceremony Complete!</h2>
+                <p>The final group public key has been generated:</p>
+                <textarea readOnly value={groupPublicKey} rows={4}></textarea>
+                <button onClick={onClose}>Close</button>
+            </div>
         </div>
     );
 };
@@ -46,7 +68,7 @@ function App() {
     const [groupId, setGroupId] = useState('my-frost-group');
     const [minSigners, setMinSigners] = useState('2');
     const [maxSigners, setMaxSigners] = useState('2');
-    const [roster, setRoster] = useState<RosterEntry[]>(Array.from({ length: 2 }, () => ({ uid: '', pubkey: '' })));
+    const [roster, setRoster] = useState<string[]>(Array.from({ length: 2 }, () => ''));
     const [sessionId, setSessionId] = useState('');
     const sessionIdRef = useRef(''); // Ref for immediate access
     const [dkgStatus, setDkgStatus] = useState<DkgStatus>('Idle');
@@ -55,6 +77,7 @@ function App() {
     const [joinedParticipants, setJoinedParticipants] = useState<Participant[]>([]);
     const [pendingSessions, setPendingSessions] = useState<PendingDKGSession[]>([]);
     const [joiningSessionId, setJoiningSessionId] = useState<string | null>(null);
+    const [showFinalKeyModal, setShowFinalKeyModal] = useState(false);
 
     // --- State for Logs & Results ---
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -76,9 +99,7 @@ function App() {
         const num = parseInt(maxSigners) || 0;
         if (num < 2) return;
         setRoster(currentRoster => {
-            const newRoster = Array.from({ length: num }, (_, i) => {
-                return currentRoster[i] || { uid: '', pubkey: '' };
-            });
+            const newRoster = Array.from({ length: num }, (_, i) => currentRoster[i] || '');
             return newRoster;
         });
     }, [maxSigners]);
@@ -97,16 +118,16 @@ function App() {
                 const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync);
                 setPrivateKey(derivedKeys.private_key_hex);
                 setPublicKey(derivedKeys.public_key_hex);
-                log('success', 'Roster keys derived from MetaMask signature.');
+                toast.success('Roster keys derived from MetaMask signature.');
             } else {
                 log('info', 'Generating new random keys...');
                 const keys = generateRandomKeys();
                 setPrivateKey(keys.private_key_hex);
                 setPublicKey(keys.public_key_hex);
-                log('success', 'New random ECDSA key pair generated.');
+                toast.success('New random ECDSA key pair generated.');
             }
         } catch (e: any) {
-            log('error', `Key generation/derivation failed: ${e.message}`);
+            toast.error(`Key generation/derivation failed: ${e.message}`);
         }
     };
 
@@ -129,9 +150,9 @@ function App() {
         setLogs([]);
     };
 
-    const handleRosterChange = (index: number, field: keyof RosterEntry, value: string) => {
+    const handleRosterChange = (index: number, value: string) => {
         const newRoster = [...roster];
-        newRoster[index] = { ...newRoster[index], [field]: value };
+        newRoster[index] = value;
         setRoster(newRoster);
     };
 
@@ -143,7 +164,7 @@ function App() {
         }
 
         if (!privateKey || !publicKey) {
-            log('error', 'Please generate or provide keys before connecting.');
+            toast.error('Please generate or provide keys before connecting.');
             return;
         }
 
@@ -169,7 +190,8 @@ function App() {
                 setIsServerConnected,
                 setFinalShare,
                 setFinalGroupKey,
-                setJoiningSessionId
+                setJoiningSessionId,
+                setShowFinalKeyModal
             }, log, ws);
         };
 
@@ -197,25 +219,22 @@ function App() {
         const min_signers = parseInt(minSigners);
         const max_signers = parseInt(maxSigners);
 
-        if (min_signers < 2 || max_signers < 2) {
-            log('error', 'Min/Max players cannot be less than 2.');
-            return;
-        }
         if (min_signers > max_signers) {
-            log('error', 'Min players cannot be greater than Max players.');
+            toast.error('Min players cannot be greater than Max players.');
             return;
         }
 
-        const participants = roster.map(r => parseInt(r.uid));
-        const participants_pubs = roster.map(r => [parseInt(r.uid), r.pubkey]);
-
-        if (participants.some(uid => isNaN(uid)) || participants_pubs.some(p => !p[1])) {
-            log('error', 'All UID and Public Key fields in the roster must be filled.');
+        if (roster.some(pubkey => pubkey.trim() === '')) {
+            toast.error('All Public Key fields in the roster must be filled.');
             return;
         }
+
+        const sortedPubKeys = [...roster].sort();
+        const participants = sortedPubKeys.map((_, index) => index + 1);
+        const participants_pubs = sortedPubKeys.map((pubkey, index) => [index + 1, pubkey]);
 
         if (participants.length !== max_signers) {
-            log('error', `Number of participants in roster must match Max Players (${max_signers}).`);
+            toast.error(`Number of participants in roster must match Max Players (${max_signers}).`);
             return;
         }
         setTotalParticipants(max_signers);
@@ -260,6 +279,8 @@ function App() {
     // --- Render ---
     return (
         <div className="App">
+            <Toaster position="top-center" reverseOrder={false} />
+            <ResultsModal show={showFinalKeyModal} onClose={() => setShowFinalKeyModal(false)} groupPublicKey={finalGroupKey} />
             <header className="App-header">
                 <h1>Tokamak-FROST DKG Web Client</h1>
                 <WalletSwitch
@@ -300,7 +321,7 @@ function App() {
                     {isServerConnected ? (
                         <button onClick={handleDisconnect} className="disconnect-button">Disconnect</button>
                     ) : (
-                        <button onClick={handleParticipantConnect} disabled={isCreator}>Connect to Participate</button>
+                        <button className="clear-logs-button" onClick={handleParticipantConnect} disabled={isCreator}>Connect to Participate</button>
                     )}
                     {dkgStatus === 'Connecting' && <p>Status: Connecting...</p>}
                 </div>
@@ -338,26 +359,24 @@ function App() {
                                 <table className="roster-input-table">
                                     <thead>
                                         <tr>
-                                            <th>UID</th>
                                             <th>Public Key</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {roster.map((entry, index) => (
+                                        {roster.map((pubkey, index) => (
                                             <tr key={index}>
-                                                <td><input type="text" value={entry.uid} onChange={e => handleRosterChange(index, 'uid', e.target.value)} /></td>
-                                                <td><input type="text" value={entry.pubkey} onChange={e => handleRosterChange(index, 'pubkey', e.target.value)} /></td>
+                                                <td><input type="text" value={pubkey} onChange={e => handleRosterChange(index, e.target.value)} /></td>
                                             </tr>
                                         ))}
                                     </tbody>
                                 </table>
                             </div>
-                            <button onClick={handleCreatorConnect} disabled={isServerConnected}>Create Session & Connect</button>
+                            <button className="clear-logs-button" onClick={handleCreatorConnect} disabled={isServerConnected}>Create Session & Connect</button>
                         </div>
                     ) : (
                         <div className="participant-panel">
                             <h3>Join Existing Session</h3>
-                            <button onClick={handleRefreshSessions} disabled={!isServerConnected}>Refresh Sessions</button>
+                            <button className="clear-logs-button" onClick={handleRefreshSessions} disabled={!isServerConnected}>Refresh Sessions</button>
                             {pendingSessions.length > 0 && (
                                 <table className="sessions-table">
                                     <thead>
@@ -374,7 +393,7 @@ function App() {
                                                 <td><code>{s.session}</code></td>
                                                 <td>{s.group_id}</td>
                                                 <td>{s.joined.length} / {s.max_signers}</td>
-                                                <td><button onClick={() => handleJoinSession(s.session)} disabled={joiningSessionId === s.session}>Join</button></td>
+                                                <td><button className="clear-logs-button" onClick={() => handleJoinSession(s.session)} disabled={joiningSessionId !== null}>Join</button></td>
                                             </tr>
                                         ))}
                                     </tbody>
