@@ -11,14 +11,14 @@
 
     /* Interactive Colors */
     --primary-color: #007bff;
-    --primary-hover-color: #0056b3;
+    --primary-hover-color: #0374ed;
     --error-color: #dc3545;
     --error-hover-color: #c82333;
     --info-color: #6c757d;
     --info-hover-color: #5a6268;
     --metamask-color: #f6851b;
     --metamask-hover-color: #e7730d;
-    --disabled-color: #a0a0a0;
+    --disabled-color: #f8abab;
 
     /* Status & Highlights */
     --success-color: #28a745;
@@ -164,8 +164,8 @@ input:focus-visible, button:focus-visible {
 }
 
 button {
-    background: var(--primary-color);
-    color: #ffffff;
+    background-color: var(--primary-color);
+    color: #fafafa;
     border: none;
     padding: 0.5rem 1rem;
     border-radius: 4px;
@@ -281,11 +281,11 @@ input:checked + .slider:before {
 }
 
 .slider.round {
-  border-radius: 28px;
+    border-radius: 28px;
 }
 
 .slider.round:before {
-  border-radius: 50%;
+    border-radius: 50%;
 }
 
 /* Status Indicator */
@@ -437,4 +437,77 @@ input:checked + .slider:before {
 
 .results-display {
     margin-top: 1rem;
+}
+
+/* Modal Styles */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.6);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--panel-background);
+    padding: 2rem;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    text-align: center;
+    width: 90%;
+    max-width: 600px;
+}
+
+.modal-content h2 {
+    color: var(--success-color);
+}
+
+/* Success Animation */
+.success-animation {
+    margin: 0 auto 1.5rem;
+}
+
+.checkmark {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    display: block;
+    stroke-width: 3;
+    stroke: var(--success-color);
+    stroke-miterlimit: 10;
+    margin: 10% auto;
+    box-shadow: inset 0px 0px 0px var(--success-color);
+    animation: fill .4s ease-in-out .4s forwards, scale .3s ease-in-out .9s both;
+}
+
+.checkmark__circle {
+    stroke-dasharray: 166;
+    stroke-dashoffset: 166;
+    stroke-width: 2;
+    stroke-miterlimit: 10;
+    stroke: var(--success-color);
+    fill: none;
+    animation: stroke .6s cubic-bezier(0.65, 0, 0.45, 1) forwards;
+}
+
+.checkmark__check {
+    transform-origin: 50% 50%;
+    stroke-dasharray: 48;
+    stroke-dashoffset: 48;
+    animation: stroke .3s cubic-bezier(0.65, 0, 0.45, 1) .8s forwards;
+}
+
+@keyframes stroke {
+    100% { stroke-dashoffset: 0; }
+}
+
+@keyframes scale {
+    0%, 100% { transform: none; }
+    50% { transform: scale3d(1.1, 1.1, 1); }
+}
+
+@keyframes fill {
+    100% { box-shadow: inset 0px 0px 0px 40px var(--success-color); }
 }
