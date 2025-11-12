@@ -13,6 +13,19 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::{Aead, AeadCore};
+use serde::{Serialize, Deserialize};
+
+// ====================================================================
+// region: Custom Structs
+// ====================================================================
+
+#[derive(Serialize, Deserialize)]
+struct KeyPackageWithMetadata {
+    key_package: frost::keys::KeyPackage,
+    threshold: u16,
+    group_id: String,
+    roster: BTreeMap<u32, String>,
+}
 
 // ====================================================================
 // region: Initialization
@@ -21,6 +34,18 @@ use aes_gcm::aead::{Aead, AeadCore};
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
+}
+
+// ====================================================================
+// region: Hashing Utilities
+// ====================================================================
+
+#[wasm_bindgen]
+pub fn keccak256(message: &str) -> String {
+    let mut hasher = Keccak256::new();
+    hasher.update(message.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(result)
 }
 
 // ====================================================================
@@ -42,7 +67,6 @@ pub fn generate_ecdsa_keypair() -> String {
 pub fn derive_key_from_signature(signature_hex: &str) -> Result<String, JsError> {
     let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x")).map_err(|e| JsError::new(&e.to_string()))?;
 
-    // Use Keccak256 as a KDF to derive a private key from the signature
     let mut hasher = Keccak256::new();
     hasher.update(&sig_bytes);
     let private_key_bytes = hasher.finalize();
@@ -61,7 +85,8 @@ pub fn derive_key_from_signature(signature_hex: &str) -> Result<String, JsError>
 pub fn sign_challenge(private_key_hex: &str, challenge: &str) -> Result<String, JsError> {
     let sk_bytes = hex::decode(private_key_hex).map_err(|e| JsError::new(&e.to_string()))?;
     let sk = K256SecretKey::from_slice(&sk_bytes).map_err(|e| JsError::new(&e.to_string()))?;
-    let signing_key = EcdsaSigningKey::from_bytes(&sk.to_bytes()).expect("dd");
+    let signing_key = EcdsaSigningKey::from_bytes(&sk.to_bytes()).map_err(|e| JsError::new(&e.to_string()))?;
+
     let challenge_uuid = uuid::Uuid::parse_str(challenge).map_err(|e| JsError::new(&e.to_string()))?;
     let challenge_bytes = challenge_uuid.as_bytes();
 
@@ -73,7 +98,7 @@ pub fn sign_challenge(private_key_hex: &str, challenge: &str) -> Result<String, 
 pub fn sign_message(private_key_hex: &str, message_hex: &str) -> Result<String, JsError> {
     let sk_bytes = hex::decode(private_key_hex).map_err(|e| JsError::new(&e.to_string()))?;
     let sk = K256SecretKey::from_slice(&sk_bytes).map_err(|e| JsError::new(&e.to_string()))?;
-    let signing_key = EcdsaSigningKey::from_bytes(&sk.to_bytes()).expect("dd");
+    let signing_key = EcdsaSigningKey::from_bytes(&sk.to_bytes()).map_err(|e| JsError::new(&e.to_string()))?;
     let message_bytes = hex::decode(message_hex).map_err(|e| JsError::new(&e.to_string()))?;
 
     let sig: EcdsaSignature = signing_key.sign_digest(Keccak256::new().chain_update(&message_bytes));
@@ -140,6 +165,18 @@ pub fn get_auth_payload_finalize(session_id: &str, id_hex: &str, group_vk_hex: &
     Ok(hex::encode(v))
 }
 
+#[wasm_bindgen]
+pub fn get_auth_payload_sign_r1(session_id: &str, group_id: &str, id_hex: &str, commits_hex: &str) -> Result<String, JsError> {
+    let payload = format!("SIGN_WS_R1|{}|{}|{}|{}", session_id, group_id, id_hex, commits_hex);
+    Ok(hex::encode(payload.into_bytes()))
+}
+
+#[wasm_bindgen]
+pub fn get_auth_payload_sign_r2(session_id: &str, group_id: &str, id_hex: &str, sigshare_hex: &str, msg32_hex: &str) -> Result<String, JsError> {
+    let payload = format!("SIGN_WS_R2|{}|{}|{}|{}|{}", session_id, group_id, id_hex, sigshare_hex, msg32_hex);
+    Ok(hex::encode(payload.into_bytes()))
+}
+
 // ====================================================================
 // region: DKG Round Logic
 // ====================================================================
@@ -190,10 +227,11 @@ pub fn dkg_part2(secret_package_hex: &str, round1_packages_hex: JsValue) -> Resu
 }
 
 #[wasm_bindgen]
-pub fn dkg_part3(secret_package_hex: &str, round1_packages_hex: JsValue, round2_packages_hex: JsValue) -> Result<String, JsError> {
+pub fn dkg_part3(secret_package_hex: &str, round1_packages_hex: JsValue, round2_packages_hex: JsValue, group_id: &str, roster_js: JsValue) -> Result<String, JsError> {
     let secret_pkg: frost::keys::dkg::round2::SecretPackage = bincode::deserialize(&hex::decode(secret_package_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
     let round1_packages_str: BTreeMap<String, String> = serde_wasm_bindgen::from_value(round1_packages_hex)?;
     let round2_packages_str: BTreeMap<String, String> = serde_wasm_bindgen::from_value(round2_packages_hex)?;
+    let roster: BTreeMap<u32, String> = serde_wasm_bindgen::from_value(roster_js)?;
 
     let mut round1_packages = BTreeMap::new();
     for (id_hex, pkg_hex) in round1_packages_str {
@@ -215,11 +253,72 @@ pub fn dkg_part3(secret_package_hex: &str, round1_packages_hex: JsValue, round2_
 
     let (key_package, public_key_package) = frost::keys::dkg::part3(&secret_pkg, &round1_packages, &round2_packages).map_err(|e| JsError::new(&e.to_string()))?;
 
+    let key_package_with_metadata = KeyPackageWithMetadata {
+        key_package,
+        threshold: *secret_pkg.min_signers(),
+        group_id: group_id.to_string(),
+        roster,
+    };
+
     let response = serde_json::json!({
-        "key_package_hex": hex::encode(bincode::serialize(&key_package).unwrap()),
+        "key_package_hex": hex::encode(bincode::serialize(&key_package_with_metadata).unwrap()),
         "group_public_key_hex": hex::encode(public_key_package.verifying_key().serialize().unwrap()),
     });
     Ok(response.to_string())
+}
+
+// ====================================================================
+// region: Interactive Signing Logic
+// ====================================================================
+
+#[wasm_bindgen]
+pub fn get_key_package_metadata(key_package_hex: &str) -> Result<String, JsError> {
+    let key_package_with_metadata: KeyPackageWithMetadata = bincode::deserialize(&hex::decode(key_package_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let response = serde_json::json!({
+        "group_id": key_package_with_metadata.group_id,
+        "threshold": key_package_with_metadata.threshold,
+        "roster": key_package_with_metadata.roster,
+        "group_public_key": hex::encode(key_package_with_metadata.key_package.verifying_key().serialize().map_err(|e| JsError::new(&e.to_string()))?),
+    });
+    Ok(response.to_string())
+}
+
+#[wasm_bindgen]
+pub fn get_signing_prerequisites(key_package_hex: &str) -> Result<String, JsError> {
+    let key_package_with_metadata: KeyPackageWithMetadata = bincode::deserialize(&hex::decode(key_package_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let key_package = key_package_with_metadata.key_package;
+
+    let response = serde_json::json!({
+        "signer_id_bincode_hex": hex::encode(bincode::serialize(key_package.identifier()).unwrap()),
+        "verifying_share_bincode_hex": hex::encode(bincode::serialize(key_package.verifying_share()).unwrap()),
+    });
+    Ok(response.to_string())
+}
+
+#[wasm_bindgen]
+pub fn sign_part1_commit(key_package_hex: &str) -> Result<String, JsError> {
+    let key_package_with_metadata: KeyPackageWithMetadata = bincode::deserialize(&hex::decode(key_package_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let key_package = key_package_with_metadata.key_package;
+    let (nonces, commitments) = frost::round1::commit(key_package.signing_share(), &mut OsRng);
+
+    let response = serde_json::json!({
+        "nonces_hex": hex::encode(bincode::serialize(&nonces).unwrap()),
+        "commitments_hex": hex::encode(bincode::serialize(&commitments).unwrap()),
+    });
+    Ok(response.to_string())
+}
+
+#[wasm_bindgen]
+pub fn sign_part2_sign(key_package_hex: &str, nonces_hex: &str, signing_package_hex: &str) -> Result<String, JsError> {
+    let key_package_with_metadata: KeyPackageWithMetadata = bincode::deserialize(&hex::decode(key_package_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let key_package = key_package_with_metadata.key_package;
+    let nonces: frost::round1::SigningNonces = bincode::deserialize(&hex::decode(nonces_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+    let signing_package: frost::SigningPackage = bincode::deserialize(&hex::decode(signing_package_hex).map_err(|e| JsError::new(&e.to_string()))?).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let signature_share = frost::round2::sign(&signing_package, &nonces, &key_package).map_err(|e| JsError::new(&e.to_string()))?;
+
+    Ok(hex::encode(bincode::serialize(&signature_share).unwrap()))
 }
 
 // ====================================================================

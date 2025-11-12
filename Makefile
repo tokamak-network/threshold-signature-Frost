@@ -3,7 +3,7 @@
 #   make dkg out=run_dkg t=3 n=3 gid=mygroup bind=127.0.0.1:9034
 #   make all out=run_dkg t=2 n=2 gid=mygroup bind=127.0.0.1:9034
 #   make onchain out=run_dkg
-#
+#   make all out=run_dkg t=2 n=5 gid=mygroup bind=127.0.0.1:9043 msg='tokamak message to sign'
 # Notes:
 # - No PID file / kill logic; server is closed via /close and exits after 3s.
 # - You can override variables on the command line.
