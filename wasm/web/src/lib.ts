@@ -11,9 +11,14 @@ import {
     get_auth_payload_round1,
     get_auth_payload_round2,
     get_auth_payload_finalize,
-    sign_message
+    sign_message,
+    sign_part1_commit,
+    sign_part2_sign,
+    get_auth_payload_sign_r1,
+    get_auth_payload_sign_r2,
+    get_signing_prerequisites,
 } from '../../pkg/tokamak_frost_wasm.js';
-import type { DkgStatus, LogEntry, Participant, PendingDKGSession } from './types';
+import type { DkgStatus, LogEntry, Participant, PendingDKGSession, SigningStatus, PendingSigningSession } from './types';
 
 // ====================================================================
 // region: Key Management
@@ -44,10 +49,10 @@ export const sendMessage = (ws: WebSocket | null, message: object, log: (level: 
 };
 
 // ====================================================================
-// region: Server Message Handler (Core DKG Logic)
+// region: DKG Message Handler
 // ====================================================================
 
-interface StateSetters {
+interface DkgStateSetters {
     setSessionId: React.Dispatch<React.SetStateAction<string>>;
     setDkgStatus: React.Dispatch<React.SetStateAction<DkgStatus>>;
     setPendingSessions: React.Dispatch<React.SetStateAction<PendingDKGSession[]>>;
@@ -64,11 +69,11 @@ interface StateSetters {
 export const handleServerMessage = async (
     msg: any,
     state: { privateKey: string, publicKey: string, isCreator: boolean, dkgState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
-    setters: StateSetters,
+    setters: DkgStateSetters,
     log: (level: LogEntry['level'], message: string) => void,
     ws: React.MutableRefObject<WebSocket | null>
 ) => {
-    log('info', `Handling message of type: ${msg.type}`);
+    log('info', `Handling DKG message of type: ${msg.type}`);
 
     switch (msg.type) {
         case 'SessionCreated':
@@ -83,7 +88,7 @@ export const handleServerMessage = async (
 
         case 'PendingDKGSessions':
             setters.setPendingSessions(msg.payload.sessions);
-            log('info', `Found ${msg.payload.sessions.length} pending sessions.`);
+            log('info', `Found ${msg.payload.sessions.length} pending DKG sessions.`);
             break;
 
         case 'Info':
@@ -97,8 +102,8 @@ export const handleServerMessage = async (
             if (disconnectMatch) {
                 const disconnectedUid = parseInt(disconnectMatch[1]);
                 log('info', `Participant ${disconnectedUid} has left the session.`);
-                setters.setJoinedParticipants(prev => prev.filter(p => p.uid !== disconnectedUid));
-                setters.setJoinedCount(prev => prev > 0 ? prev - 1 : 0);
+                setters.setJoinedParticipants((prev: Participant[]) => prev.filter(p => p.uid !== disconnectedUid));
+                setters.setJoinedCount((prev: number) => prev > 0 ? prev - 1 : 0);
             }
             break;
 
@@ -122,13 +127,8 @@ export const handleServerMessage = async (
         case 'LoginOk':
             setters.setIsServerConnected(true);
             setters.setDkgStatus('Connected');
-            log('success', `Logged in successfully as User ID: ${msg.payload.user_id}`);
-            if (state.isCreator) {
-                setters.setJoinedCount(1);
-                sendMessage(ws.current, { type: 'JoinSession', payload: { session: state.sessionIdRef.current } }, log);
-            } else {
-                sendMessage(ws.current, { type: 'ListPendingDKGSessions' }, log);
-            }
+            log('success', `Logged in successfully.`);
+            sendMessage(ws.current, { type: 'ListPendingDKGSessions' }, log);
             break;
 
         case 'ReadyRound1':
@@ -138,6 +138,7 @@ export const handleServerMessage = async (
             setters.setTotalParticipants(msg.payload.max_signers);
             setters.setJoinedParticipants(serverRoster.map((p: {uid: number, pubkey: string}) => ({ uid: p.uid, pubkey: p.pubkey })));
             state.dkgState.current.roster = serverRoster;
+            state.dkgState.current.group_id = msg.payload.group_id;
             setters.setDkgStatus('Round1');
             try {
                 await new Promise(resolve => setTimeout(resolve, 1000));
@@ -188,9 +189,9 @@ export const handleServerMessage = async (
                 for (const [id_hex, pkg_hex] of Object.entries(outgoing_packages)) {
                     const recipient = state.dkgState.current.roster.find((p: any) => p.id_hex === id_hex);
                     if (!recipient) throw new Error(`Could not find public key for recipient ${id_hex}`);
-
+                    
                     const { ephemeral_public_key_hex, nonce_hex, ciphertext_hex } = JSON.parse(ecies_encrypt(recipient.pubkey, pkg_hex as string));
-
+                    
                     const payload_hex = get_auth_payload_round2(state.sessionIdRef.current, state.dkgState.current.identifier, id_hex, ephemeral_public_key_hex, nonce_hex, ciphertext_hex);
                     const signature = sign_message(state.privateKey, payload_hex);
 
@@ -225,7 +226,15 @@ export const handleServerMessage = async (
                 const r1_packages_for_part3 = { ...state.dkgState.current.all_r1_packages };
                 delete r1_packages_for_part3[state.dkgState.current.identifier];
 
-                const { key_package_hex, group_public_key_hex } = JSON.parse(dkg_part3(state.dkgState.current.r2_secret, r1_packages_for_part3, decrypted_packages));
+                const rosterForPart3 = new Map(state.dkgState.current.roster.map((p: any) => [p.uid, p.pubkey]));
+
+                const { key_package_hex, group_public_key_hex } = JSON.parse(dkg_part3(
+                    state.dkgState.current.r2_secret, 
+                    r1_packages_for_part3, 
+                    decrypted_packages, 
+                    state.dkgState.current.group_id, 
+                    rosterForPart3
+                ));
                 setters.setFinalShare(key_package_hex);
                 setters.setFinalGroupKey(group_public_key_hex);
                 setters.setDkgStatus('Finalized');
@@ -234,12 +243,12 @@ export const handleServerMessage = async (
                 const payload_hex = get_auth_payload_finalize(state.sessionIdRef.current, state.dkgState.current.identifier, group_public_key_hex);
                 const signature = sign_message(state.privateKey, payload_hex);
 
-                sendMessage(ws.current, {
-                    type: 'FinalizeSubmit',
-                    payload: {
-                        session: state.sessionIdRef.current,
-                        id_hex: state.dkgState.current.identifier,
-                        group_vk_sec1_hex: group_public_key_hex,
+                sendMessage(ws.current, { 
+                    type: 'FinalizeSubmit', 
+                    payload: { 
+                        session: state.sessionIdRef.current, 
+                        id_hex: state.dkgState.current.identifier, 
+                        group_vk_sec1_hex: group_public_key_hex, 
                         sig_ecdsa_hex: signature
                     }
                 }, log);
@@ -268,7 +277,160 @@ export const handleServerMessage = async (
             break;
 
         default:
-            log('info', `Received unhandled message type: ${msg.type}`);
+            log('info', `Received unhandled DKG message type: ${msg.type}`);
+            break;
+    }
+};
+
+// ====================================================================
+// region: Signing Message Handler
+// ====================================================================
+
+interface SigningStateSetters {
+    setSessionId: React.Dispatch<React.SetStateAction<string>>;
+    setSigningStatus: React.Dispatch<React.SetStateAction<SigningStatus>>;
+    setPendingSessions: React.Dispatch<React.SetStateAction<PendingSigningSession[]>>;
+    setFinalSignature: React.Dispatch<React.SetStateAction<string>>;
+    setIsServerConnected: React.Dispatch<React.SetStateAction<boolean>>;
+}
+
+export const handleSigningServerMessage = async (
+    msg: any,
+    state: { privateKey: string, publicKey: string, keyPackage: string, signingState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
+    setters: SigningStateSetters,
+    log: (level: LogEntry['level'], message: string) => void,
+    ws: React.MutableRefObject<WebSocket | null>
+) => {
+    log('info', `Handling Signing message of type: ${msg.type}`);
+
+    if (msg.type === 'Error') {
+        log('error', `Server error: ${msg.payload.message}`);
+        setters.setSigningStatus('Failed');
+        return;
+    }
+
+    switch (msg.type) {
+        case 'SignSessionCreated':
+            const newSessionId = msg.payload.session;
+            setters.setSessionId(newSessionId);
+            state.sessionIdRef.current = newSessionId;
+            setters.setSigningStatus('SessionCreated');
+            log('success', `Signing session created: ${newSessionId}`);
+            log('info', 'Now refreshing session list...');
+            sendMessage(ws.current, { type: 'ListPendingSigningSessions' }, log);
+            break;
+
+        case 'Challenge':
+            try {
+                const signature = sign_challenge(state.privateKey, msg.payload.challenge);
+                log('info', 'Challenge signed. Sending login...');
+                sendMessage(ws.current, {
+                    type: 'Login',
+                    payload: {
+                        challenge: msg.payload.challenge,
+                        pubkey_hex: state.publicKey,
+                        signature_hex: signature,
+                    }
+                }, log);
+            } catch (e: any) {
+                log('error', `Failed to sign challenge: ${e.message}`);
+            }
+            break;
+        
+        case 'LoginOk':
+            setters.setIsServerConnected(true);
+            setters.setSigningStatus('Connected');
+            log('success', `Logged in successfully.`);
+            sendMessage(ws.current, { type: 'ListPendingSigningSessions' }, log);
+            break;
+
+        case 'Info':
+            log('info', `Server Info: ${msg.payload.message}`);
+            const joinMatch = msg.payload.message.match(/participant (\d+) joined session (\S+)/);
+            if (joinMatch) {
+                const joinedSuid = parseInt(joinMatch[1]);
+                const sessionId = joinMatch[2];
+                setters.setPendingSessions((prev: PendingSigningSession[]) => 
+                    prev.map(s => 
+                        s.session === sessionId 
+                            ? { ...s, joined: [...s.joined, joinedSuid] } 
+                            : s
+                    )
+                );
+            }
+            break;
+
+        case 'PendingSigningSessions':
+            setters.setPendingSessions(msg.payload.sessions);
+            log('info', `Found ${msg.payload.sessions.length} pending signing sessions.`);
+            break;
+
+        case 'SignReadyRound1':
+            log('info', 'All participants have joined. Starting Signing Round 1...');
+            setters.setSigningStatus('Round1');
+            try {
+                const { nonces_hex, commitments_hex } = JSON.parse(sign_part1_commit(state.keyPackage));
+                state.signingState.current.nonces = nonces_hex;
+                
+                const myRosterEntry = msg.payload.roster.find((p: [number, string, string]) => p[2] === state.publicKey);
+                if (!myRosterEntry) {
+                    throw new Error("Could not find myself in the session roster.");
+                }
+                const myIdHex = myRosterEntry[1];
+                state.signingState.current.identifier = myIdHex;
+                state.signingState.current.group_id = msg.payload.group_id;
+                state.signingState.current.msg32_hex = msg.payload.msg_keccak32_hex;
+
+                const payload_hex = get_auth_payload_sign_r1(state.sessionIdRef.current, msg.payload.group_id, myIdHex, commitments_hex);
+                const signature = sign_message(state.privateKey, payload_hex);
+
+                sendMessage(ws.current, {
+                    type: 'SignRound1Submit',
+                    payload: {
+                        session: state.sessionIdRef.current,
+                        id_hex: myIdHex,
+                        commitments_bincode_hex: commitments_hex,
+                        sig_ecdsa_hex: signature,
+                    }
+                }, log);
+            } catch (e: any) {
+                log('error', `Signing Part 1 failed: ${e.message}`);
+            }
+            break;
+        
+        case 'SignSigningPackage':
+            log('info', 'Received signing package. Starting Signing Round 2...');
+            setters.setSigningStatus('Round2');
+            try {
+                const signature_share_hex = sign_part2_sign(state.keyPackage, state.signingState.current.nonces, msg.payload.signing_package_bincode_hex);
+
+                const payload_hex = get_auth_payload_sign_r2(
+                    state.sessionIdRef.current, 
+                    state.signingState.current.group_id, 
+                    state.signingState.current.identifier, 
+                    signature_share_hex,
+                    state.signingState.current.msg32_hex
+                );
+                const signature = sign_message(state.privateKey, payload_hex);
+
+                sendMessage(ws.current, {
+                    type: 'SignRound2Submit',
+                    payload: {
+                        session: state.sessionIdRef.current,
+                        id_hex: state.signingState.current.identifier,
+                        signature_share_bincode_hex: signature_share_hex,
+                        sig_ecdsa_hex: signature,
+                    }
+                }, log);
+            } catch (e: any) {
+                log('error', `Signing Part 2 failed: ${e.message}`);
+            }
+            break;
+
+        case 'SignatureReady':
+            log('success', `Signature Ready!`);
+            setters.setFinalSignature(msg.payload.signature_bincode_hex);
+            setters.setSigningStatus('Complete');
             break;
     }
 };

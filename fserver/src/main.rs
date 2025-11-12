@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -23,6 +23,7 @@ use axum::{
     routing::get,
     Router,
 };
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use frost_core::Field;
 use frost_secp256k1 as frost;
@@ -35,6 +36,7 @@ use signature::DigestVerifier;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{sleep, Duration};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 // -------- ECDSA auth helpers (source integrity & authentication) --------
@@ -273,6 +275,7 @@ struct PendingDKGSession {
     max_signers: u16,
     participants: Vec<u32>,
     joined: Vec<u32>,
+    created_at: String,
 }
 
 // Used by ServerMsg::PendingSigningSessions
@@ -283,6 +286,9 @@ struct PendingSignSession {
     threshold: u16,
     participants: Vec<u32>,
     joined: Vec<u32>,
+    message_hex: String,
+    participants_pubs: Vec<(u32, String)>,
+    created_at: String,
 }
 
 
@@ -316,6 +322,7 @@ struct Session {
     min_signers: u16,
     max_signers: u16,
     group_id: String,
+    created_at: DateTime<Utc>,
     // fixed list of session-local user ids allowed
     participants: Vec<u32>,
 
@@ -351,7 +358,9 @@ struct SignSession {
     session: String,
     group_id: String,
     threshold: u16,
+    created_at: DateTime<Utc>,
     participants: Vec<u32>,
+    participants_pubs: Vec<(u32, String)>,
 
     // session-local identity maps
     suid_to_principal: BTreeMap<u32, String>,
@@ -460,10 +469,16 @@ async fn run_server(bind: SocketAddr) -> Result<()> {
         shutdown: notify.clone(),
     };
 
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:5173".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers(tower_http::cors::Any);
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/close", get(close_handler))
-        .with_state(state);
+        .with_state(state)
+        .layer(cors);
 
     let listener = TcpListener::bind(bind).await?;
     println!("DKG coordinator listening on ws://{bind}/ws");
@@ -656,6 +671,7 @@ async fn handle_client_text(
                 min_signers,
                 max_signers,
                 group_id,
+                created_at: Utc::now(),
                 participants: participants.clone(),
                 suid_to_principal,
                 principal_to_suid,
@@ -864,6 +880,7 @@ async fn handle_client_text(
                         max_signers: s.max_signers,
                         participants: s.participants.clone(),
                         joined: s.joined.iter().copied().collect(),
+                        created_at: s.created_at.to_rfc3339(),
                     })
                     .collect()
             };
@@ -882,12 +899,18 @@ async fn handle_client_text(
                     .sign_sessions
                     .values()
                     .filter(|s| s.principal_to_suid.contains_key(principal) && s.joined.len() < s.participants.len())
-                    .map(|s| PendingSignSession {
-                        session: s.session.clone(),
-                        group_id: s.group_id.clone(),
-                        threshold: s.threshold,
-                        participants: s.participants.clone(),
-                        joined: s.joined.iter().copied().collect(),
+                    .map(|s| {
+                        let msg32_hex = hex::encode(s.msg32);
+                        PendingSignSession {
+                            session: s.session.clone(),
+                            group_id: s.group_id.clone(),
+                            threshold: s.threshold,
+                            participants: s.participants.clone(),
+                            joined: s.joined.iter().copied().collect(),
+                            message_hex: msg32_hex,
+                            participants_pubs: s.participants_pubs.clone(),
+                            created_at: s.created_at.to_rfc3339(),
+                        }
                     })
                     .collect()
             };
@@ -1163,11 +1186,15 @@ async fn handle_client_text(
                 let fid: frost::Identifier = ((i + 1) as u16).try_into().unwrap();
                 idmap.insert(*suid, fid);
             }
-            // message digest (Keccak256)
-            let msg_bytes = if let Some(h) = message_hex.strip_prefix("0x") { hex::decode(h)? } else { hex::decode(&message_hex)? };
-            let msg32_vec = Keccak256::digest(&msg_bytes).to_vec();
+
+            // Validate and store the message hash
+            let clean_hex = message_hex.strip_prefix("0x").unwrap_or(&message_hex);
+            if clean_hex.len() != 64 {
+                return Err(anyhow!("message_hex must be 32 bytes (64 hex characters)"));
+            }
+            let msg_bytes = hex::decode(clean_hex).context("invalid message_hex")?;
             let mut msg32 = [0u8; 32];
-            msg32.copy_from_slice(&msg32_vec);
+            msg32.copy_from_slice(&msg_bytes);
 
             // Build roster snapshot for clients
             let mut roster_vec = Vec::new();
@@ -1182,7 +1209,9 @@ async fn handle_client_text(
                 session: session.clone(),
                 group_id: group_id.clone(),
                 threshold,
+                created_at: Utc::now(),
                 participants: participants.clone(),
+                participants_pubs: participants_pubs.clone(),
                 suid_to_principal,
                 principal_to_suid,
                 idmap,
@@ -1293,7 +1322,7 @@ async fn handle_client_text(
                 let commits: frost::round1::SigningCommitments =
                     bincode::deserialize(&hex::decode(&commitments_bincode_hex)?)?;
                 s.commitments.insert(id, commits);
-                if s.commitments.len() == s.participants.len() {
+                if s.commitments.len() >= s.threshold as usize {
                     // Build SigningPackage and prepare for broadcast
                     let sp = frost::SigningPackage::new(s.commitments.clone(), &s.msg32);
                     sp_hex = hex::encode(bincode::serialize(&sp)?);

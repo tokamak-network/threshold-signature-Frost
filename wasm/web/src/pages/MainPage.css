@@ -1,0 +1,49 @@
+.main-page-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 2rem;
+}
+
+.main-page-container .App-header {
+    border-bottom: none;
+    margin-bottom: 3rem;
+    text-align: center;
+}
+
+.ceremony-selection {
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    width: 100%;
+    max-width: 1000px;
+}
+
+.ceremony-button {
+    background-color: var(--panel-background);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: left;
+    box-shadow: 0 2px 4px rgb(0 0 0 / 0.05);
+    text-decoration: none;
+    color: var(--text-color);
+    transition: transform 0.2s, box-shadow 0.2s;
+    flex: 1;
+}
+
+.ceremony-button:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 15px rgba(0, 0, 0, 0.1);
+}
+
+.ceremony-button h2 {
+    margin-top: 0;
+    color: var(--primary-color);
+}
+
+.ceremony-button p {
+    color: var(--text-color-light);
+}
