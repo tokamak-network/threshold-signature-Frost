@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import toast, { Toaster } from 'react-hot-toast';
-import type { DkgStatus, LogEntry, Participant, PendingDKGSession } from '../types';
+import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGSession } from '../types';
 import { handleServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from '../lib';
 import init from '../../../pkg/tokamak_frost_wasm.js';
 import '../App.css';
+import { useModal } from '../useModal';
 
 // ====================================================================
 // region: Helper Components
@@ -25,11 +26,18 @@ const WalletSwitch = ({ isConnected, address, onConnect, onDisconnect }: { isCon
 };
 
 const ResultsModal = ({ show, onClose, groupPublicKey }: { show: boolean, onClose: () => void, groupPublicKey: string }) => {
+    const { position, modalRef, onMouseDown, onMouseMove, onMouseUp } = useModal();
+
     if (!show) return null;
 
     return (
-        <div className="modal-overlay">
-            <div className="modal-content">
+        <div className="modal-overlay" onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+            <div
+                ref={modalRef}
+                className="modal-content"
+                style={{ top: position.y, left: position.x, cursor: 'move' }}
+                onMouseDown={onMouseDown}
+            >
                 <div className="success-animation">
                     <svg className="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
                         <circle className="checkmark__circle" cx="26" cy="26" r="25" fill="none" />
@@ -39,7 +47,119 @@ const ResultsModal = ({ show, onClose, groupPublicKey }: { show: boolean, onClos
                 <h2>DKG Ceremony Complete!</h2>
                 <p>The final group public key has been generated:</p>
                 <textarea readOnly value={groupPublicKey} rows={4}></textarea>
-                <button onClick={onClose}>Close</button>
+                <button onClick={onClose} className="grey-button">Close</button>
+            </div>
+        </div>
+    );
+};
+
+const SessionDetailsModal = ({ session, onClose, zIndex }: { session: PendingDKGSession | CompletedDKGSession | null, onClose: () => void, zIndex: number }) => {
+    const { position, modalRef, onMouseDown, onMouseMove, onMouseUp } = useModal();
+
+    if (!session) return null;
+
+    const handleCopy = (text: string) => {
+        navigator.clipboard.writeText(text);
+        toast.success('Copied to clipboard!');
+    };
+
+    return (
+        <div className="modal-overlay" style={{ zIndex }} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+            <div
+                ref={modalRef}
+                className="modal-content session-details-modal"
+                style={{ top: position.y, left: position.x, cursor: 'move' }}
+                onMouseDown={onMouseDown}
+            >
+                <h2>Session Details</h2>
+                <div className="detail-row">
+                    <strong>Session ID:</strong>
+                    <code>{session.session}</code>
+                </div>
+                <div className="detail-row">
+                    <strong>Group ID:</strong>
+                    <span>{session.group_id}</span>
+                </div>
+                {'group_vk_sec1_hex' in session && (
+                    <div className="detail-row">
+                        <strong>Group Public Key:</strong>
+                        <textarea readOnly value={(session as CompletedDKGSession).group_vk_sec1_hex} rows={4}></textarea>
+                    </div>
+                )}
+                <div className="detail-row">
+                    <strong>Participants:</strong>
+                    <table className="participant-table">
+                        <thead>
+                            <tr>
+                                <th>SUID</th>
+                                <th>Roster Public Key</th>
+                                <th>Copy</th>
+                                <th>Joined</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {session.participants_pubs.map(([suid, pubkey]) => (
+                                <tr key={suid}>
+                                    <td>{suid}{session.creator_suid === suid ? ' (Creator)' : ''}</td>
+                                    <td><code title={pubkey}>{`${pubkey.slice(0, 10)}...${pubkey.slice(-8)}`}</code></td>
+                                    <td>
+                                        <button onClick={() => handleCopy(pubkey)} className="copy-button">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                        </button>
+                                    </td>
+                                    <td className="status-cell">
+                                        {session.joined.includes(suid) ? (
+                                            <span className="status-ok">✓</span>
+                                        ) : (
+                                            <span className="status-err">✗</span>
+                                        )}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+                <button onClick={onClose} className="grey-button">Close</button>
+            </div>
+        </div>
+    );
+};
+
+const CompletedSessionsModal = ({ sessions, onClose, onSelect, zIndex }: { sessions: CompletedDKGSession[], onClose: () => void, onSelect: (session: CompletedDKGSession) => void, zIndex: number }) => {
+    const { position, modalRef, onMouseDown, onMouseMove, onMouseUp } = useModal();
+
+    if (sessions.length === 0) return null;
+
+    return (
+        <div className="modal-overlay" style={{ zIndex }} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+            <div
+                ref={modalRef}
+                className="modal-content session-details-modal"
+                style={{ top: position.y, left: position.x, cursor: 'move' }}
+                onMouseDown={onMouseDown}
+            >
+                <h2>Completed DKG Sessions</h2>
+                <table className="sessions-table">
+                    <thead>
+                        <tr>
+                            <th>Session ID</th>
+                            <th>Group</th>
+                            <th>Created</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sessions.map(s => (
+                            <tr key={s.session}>
+                                <td><code>{s.session.slice(0, 8)}...</code></td>
+                                <td>{s.group_id}</td>
+                                <td>{new Date(s.created_at).toLocaleString()}</td>
+                                <td><button className="grey-button" onClick={() => onSelect(s)}>View</button></td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                <button onClick={onClose} className="grey-button">Close</button>
             </div>
         </div>
     );
@@ -62,6 +182,7 @@ function DkgPage() {
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
+    const [mySuid, setMySuid] = useState<number | null>(null);
 
     // --- State for DKG Ceremony ---
     const [isCreator, setIsCreator] = useState(false);
@@ -76,8 +197,12 @@ function DkgPage() {
     const [totalParticipants, setTotalParticipants] = useState(0);
     const [joinedParticipants, setJoinedParticipants] = useState<Participant[]>([]);
     const [pendingSessions, setPendingSessions] = useState<PendingDKGSession[]>([]);
+    const [completedSessions, setCompletedSessions] = useState<CompletedDKGSession[]>([]);
     const [joiningSessionId, setJoiningSessionId] = useState<string | null>(null);
     const [showFinalKeyModal, setShowFinalKeyModal] = useState(false);
+    const [viewingSession, setViewingSession] = useState<PendingDKGSession | CompletedDKGSession | null>(null);
+    const [showCompleted, setShowCompleted] = useState(false);
+    const [modalStack, setModalStack] = useState<string[]>([]);
 
     // --- State for Logs & Results ---
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -104,10 +229,43 @@ function DkgPage() {
         });
     }, [maxSigners]);
 
+    useEffect(() => {
+        if (isCreator && publicKey) {
+            setRoster(currentRoster => {
+                const newRoster = [...currentRoster];
+                newRoster[0] = publicKey;
+                return newRoster;
+            });
+        }
+    }, [isCreator, publicKey]);
+
+    useEffect(() => {
+        if (viewingSession) {
+            const allSessions = [...pendingSessions, ...completedSessions];
+            const updatedSession = allSessions.find(s => s.session === viewingSession.session);
+            if (updatedSession) {
+                setViewingSession(updatedSession);
+            }
+        }
+    }, [pendingSessions, completedSessions, viewingSession]);
+
     // --- Logging Utility ---
     const log = (level: LogEntry['level'], message: string) => {
         console.log(`[${level.toUpperCase()}] ${message}`);
         setLogs(prev => [...prev, { level, message }]);
+    };
+
+    // --- Modal Management ---
+    const openModal = (modalId: string) => {
+        setModalStack(prev => [...prev, modalId]);
+    };
+
+    const closeModal = (modalId: string) => {
+        setModalStack(prev => prev.filter(id => id !== modalId));
+    };
+
+    const getZIndex = (modalId: string) => {
+        return modalStack.indexOf(modalId) + 100;
     };
 
     // --- Core Functions ---
@@ -156,10 +314,9 @@ function DkgPage() {
         setRoster(newRoster);
     };
 
-    const commonConnect = (onOpen: () => void) => {
+    const handleConnect = () => {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             log('info', 'Already connected.');
-            onOpen();
             return;
         }
 
@@ -175,7 +332,10 @@ function DkgPage() {
         const socket = new WebSocket(url);
         ws.current = socket;
 
-        socket.onopen = onOpen;
+        socket.onopen = () => {
+            log('info', 'Connected. Requesting challenge to log in...');
+            sendMessage(ws.current, { type: 'RequestChallenge' }, log);
+        };
 
         socket.onmessage = (event) => {
             log('data', `Received: ${event.data}`);
@@ -184,6 +344,7 @@ function DkgPage() {
                 setSessionId,
                 setDkgStatus,
                 setPendingSessions,
+                setCompletedSessions,
                 setJoinedCount,
                 setTotalParticipants,
                 setJoinedParticipants,
@@ -191,7 +352,8 @@ function DkgPage() {
                 setFinalShare,
                 setFinalGroupKey,
                 setJoiningSessionId,
-                setShowFinalKeyModal
+                setShowFinalKeyModal,
+                setMySuid,
             }, log, ws);
         };
 
@@ -213,7 +375,7 @@ function DkgPage() {
         };
     };
 
-    const handleCreatorConnect = () => {
+    const handleAnnounceDKG = () => {
         setFinalShare('');
         setFinalGroupKey('');
         const min_signers = parseInt(minSigners);
@@ -224,8 +386,8 @@ function DkgPage() {
             return;
         }
 
-        if (roster.some(pubkey => pubkey.trim() === '')) {
-            toast.error('All Public Key fields in the roster must be filled.');
+        if (roster.some(pubkey => pubkey.trim() === '') || roster.length !== max_signers) {
+            toast.error(`All Public Key fields in the roster must be filled and match Max Players (${max_signers}).`);
             return;
         }
 
@@ -233,33 +395,20 @@ function DkgPage() {
         const participants = sortedPubKeys.map((_, index) => index + 1);
         const participants_pubs = sortedPubKeys.map((pubkey, index) => [index + 1, pubkey]);
 
-        if (participants.length !== max_signers) {
-            toast.error(`Number of participants in roster must match Max Players (${max_signers}).`);
-            return;
-        }
         setTotalParticipants(max_signers);
 
-        commonConnect(() => {
-            log('info', 'Connected. Announcing session...');
-            sendMessage(ws.current, {
-                type: 'AnnounceSession',
-                payload: {
-                    group_id: groupId,
-                    min_signers: min_signers,
-                    max_signers: max_signers,
-                    participants: participants,
-                    participants_pubs: participants_pubs
-                }
-            }, log);
-            setIsCreator(false);
-        });
-    };
-
-    const handleParticipantConnect = () => {
-        commonConnect(() => {
-            log('info', 'Connected. Requesting challenge to log in...');
-            sendMessage(ws.current, { type: 'RequestChallenge' }, log);
-        });
+        log('info', 'Announcing DKG session...');
+        sendMessage(ws.current, {
+            type: 'AnnounceDKGSession',
+            payload: {
+                group_id: groupId,
+                min_signers: min_signers,
+                max_signers: max_signers,
+                participants: participants,
+                participants_pubs: participants_pubs
+            }
+        }, log);
+        setIsCreator(false);
     };
 
     const handleRefreshSessions = () => {
@@ -267,14 +416,36 @@ function DkgPage() {
         sendMessage(ws.current, { type: 'ListPendingDKGSessions' }, log);
     };
 
+    const handleViewCompleted = () => {
+        log('info', 'Fetching list of completed DKG sessions...');
+        sendMessage(ws.current, { type: 'ListCompletedDKGSessions' }, log);
+        setShowCompleted(true);
+        openModal('completed');
+    };
+
     const handleJoinSession = (sessionToJoin: string) => {
         setFinalShare('');
         setFinalGroupKey('');
         setJoiningSessionId(sessionToJoin);
-        log('info', `Joining session ${sessionToJoin}...`);
+        log('info', `Joining DKG session ${sessionToJoin}...`);
         sessionIdRef.current = sessionToJoin;
-        sendMessage(ws.current, { type: 'JoinSession', payload: { session: sessionToJoin } }, log);
+        sendMessage(ws.current, { type: 'JoinDKGSession', payload: { session: sessionToJoin } }, log);
         setDkgStatus('Joined');
+
+        if (mySuid) {
+            setPendingSessions((prev: PendingDKGSession[]) => 
+                prev.map(s => 
+                    s.session === sessionToJoin 
+                        ? { ...s, joined: [...s.joined, mySuid] } 
+                        : s
+                )
+            );
+        }
+    };
+
+    const handleViewSessionDetails = (session: PendingDKGSession | CompletedDKGSession) => {
+        setViewingSession(session);
+        openModal('details');
     };
 
     // --- Render ---
@@ -282,6 +453,29 @@ function DkgPage() {
         <div className="App">
             <Toaster position="top-center" reverseOrder={false} />
             <ResultsModal show={showFinalKeyModal} onClose={() => setShowFinalKeyModal(false)} groupPublicKey={finalGroupKey} />
+            {viewingSession && (
+                <SessionDetailsModal
+                    session={viewingSession}
+                    onClose={() => {
+                        setViewingSession(null);
+                        closeModal('details');
+                    }}
+                    zIndex={getZIndex('details')}
+                />
+            )}
+            {showCompleted && (
+                <CompletedSessionsModal
+                    sessions={completedSessions}
+                    onClose={() => {
+                        setShowCompleted(false);
+                        closeModal('completed');
+                    }}
+                    onSelect={(s) => {
+                        handleViewSessionDetails(s);
+                    }}
+                    zIndex={getZIndex('completed')}
+                />
+            )}
             <header className="App-header">
                 <h1>Tokamak-FROST DKG Web Client</h1>
                 <WalletSwitch
@@ -322,7 +516,7 @@ function DkgPage() {
                     {isServerConnected ? (
                         <button onClick={handleDisconnect} className="disconnect-button">Disconnect</button>
                     ) : (
-                        <button className="grey-button" onClick={handleParticipantConnect}>Connect & Login</button>
+                        <button className="grey-button" onClick={handleConnect}>Connect & Login</button>
                     )}
                     {dkgStatus === 'Connecting' && <p>Status: Connecting...</p>}
                 </div>
@@ -346,13 +540,13 @@ function DkgPage() {
                             <h3>Create New Session</h3>
                             <div className="form-group">
                                 <label>Group ID</label>
-                                <input type="text" value={groupId} onChange={e => setGroupId(e.target.value)} />
+                                <input type="text" value={groupId} onChange={e => setGroupId(e.target.value)} disabled={!isServerConnected} />
                             </div>
                             <div className="form-group">
                                 <label>Min / Max Players</label>
                                 <div style={{ display: 'flex', gap: '10px' }}>
-                                    <input type="number" value={minSigners} onChange={e => setMinSigners(e.target.value)} min="2" />
-                                    <input type="number" value={maxSigners} onChange={e => setMaxSigners(e.target.value)} min="2" />
+                                    <input type="number" value={minSigners} onChange={e => setMinSigners(e.target.value)} min="2" disabled={!isServerConnected} />
+                                    <input type="number" value={maxSigners} onChange={e => setMaxSigners(e.target.value)} min="2" disabled={!isServerConnected} />
                                 </div>
                             </div>
                             <div className="form-group">
@@ -366,18 +560,21 @@ function DkgPage() {
                                     <tbody>
                                         {roster.map((pubkey, index) => (
                                             <tr key={index}>
-                                                <td><input type="text" value={pubkey} onChange={e => handleRosterChange(index, e.target.value)} /></td>
+                                                <td><input type="text" value={pubkey} onChange={e => handleRosterChange(index, e.target.value)} disabled={!isServerConnected} /></td>
                                             </tr>
                                         ))}
                                     </tbody>
                                 </table>
                             </div>
-                            <button onClick={handleCreatorConnect} className="grey-button">Create Session & Connect</button>
+                            <button onClick={handleAnnounceDKG} className="grey-button" disabled={!isServerConnected}>Announce DKG Session</button>
                         </div>
                     ) : (
                         <div className="participant-panel">
                             <h3>Join Existing Session</h3>
-                            <button onClick={handleRefreshSessions} className="grey-button" disabled={!isServerConnected}>Refresh Sessions</button>
+                            <div className="button-group">
+                                <button onClick={handleRefreshSessions} className="grey-button" disabled={!isServerConnected}>Refresh Sessions</button>
+                                <button onClick={handleViewCompleted} className="grey-button" disabled={!isServerConnected}>Completed Sessions</button>
+                            </div>
                             {pendingSessions.length > 0 && (
                                 <table className="sessions-table">
                                     <thead>
@@ -391,7 +588,7 @@ function DkgPage() {
                                     <tbody>
                                         {pendingSessions.map(s => (
                                             <tr key={s.session}>
-                                                <td><code>{s.session.slice(0, 8)}...</code></td>
+                                                <td><button className="link-button" onClick={() => handleViewSessionDetails(s)}>{s.session.slice(0, 8)}...</button></td>
                                                 <td>{s.group_id}</td>
                                                 <td>{new Date(s.created_at).toLocaleString()}</td>
                                                 <td><button className="grey-button" onClick={() => handleJoinSession(s.session)} disabled={joiningSessionId !== null}>Join</button></td>
@@ -405,11 +602,11 @@ function DkgPage() {
 
                     {sessionId && isCreator && (
                         <div className="session-id-display">
-                            <p>Session Created! Share this ID with participants:</p>
+                            <p>DKG Session Created! Share this ID with participants:</p>
                             <code>{sessionId}</code>
                         </div>
                     )}
-                    
+
                     {totalParticipants > 0 && (
                         <div className="join-status">
                             <p>Participants Joined: {joinedCount} / {totalParticipants}</p>

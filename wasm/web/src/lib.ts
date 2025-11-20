@@ -16,9 +16,8 @@ import {
     sign_part2_sign,
     get_auth_payload_sign_r1,
     get_auth_payload_sign_r2,
-    get_signing_prerequisites,
 } from '../../pkg/tokamak_frost_wasm.js';
-import type { DkgStatus, LogEntry, Participant, PendingDKGSession, SigningStatus, PendingSigningSession } from './types';
+import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGSession, SigningStatus, PendingSigningSession, CompletedSigningSession } from './types';
 
 // ====================================================================
 // region: Key Management
@@ -56,6 +55,7 @@ interface DkgStateSetters {
     setSessionId: React.Dispatch<React.SetStateAction<string>>;
     setDkgStatus: React.Dispatch<React.SetStateAction<DkgStatus>>;
     setPendingSessions: React.Dispatch<React.SetStateAction<PendingDKGSession[]>>;
+    setCompletedSessions: React.Dispatch<React.SetStateAction<CompletedDKGSession[]>>;
     setJoinedCount: React.Dispatch<React.SetStateAction<number>>;
     setTotalParticipants: React.Dispatch<React.SetStateAction<number>>;
     setJoinedParticipants: React.Dispatch<React.SetStateAction<Participant[]>>;
@@ -64,6 +64,7 @@ interface DkgStateSetters {
     setFinalGroupKey: React.Dispatch<React.SetStateAction<string>>;
     setJoiningSessionId: React.Dispatch<React.SetStateAction<string | null>>;
     setShowFinalKeyModal: React.Dispatch<React.SetStateAction<boolean>>;
+    setMySuid: React.Dispatch<React.SetStateAction<number | null>>;
 }
 
 export const handleServerMessage = async (
@@ -76,11 +77,11 @@ export const handleServerMessage = async (
     log('info', `Handling DKG message of type: ${msg.type}`);
 
     switch (msg.type) {
-        case 'SessionCreated':
+        case 'DKGSessionCreated':
             const newSessionId = msg.payload.session;
             setters.setSessionId(newSessionId);
             state.sessionIdRef.current = newSessionId;
-            setters.setDkgStatus('SessionCreated');
+            setters.setDkgStatus('DKGSessionCreated');
             log('success', `DKG session created: ${newSessionId}`);
             log('info', 'Announce successful. Now requesting challenge to log in...');
             sendMessage(ws.current, { type: 'RequestChallenge' }, log);
@@ -91,12 +92,24 @@ export const handleServerMessage = async (
             log('info', `Found ${msg.payload.sessions.length} pending DKG sessions.`);
             break;
 
+        case 'CompletedDKGSessions':
+            setters.setCompletedSessions(msg.payload.sessions);
+            log('info', `Found ${msg.payload.sessions.length} completed DKG sessions.`);
+            break;
+
         case 'Info':
             log('info', `Server Info: ${msg.payload.message}`);
-            const joinMatch = msg.payload.message.match(/(\d+)\/(\d+)/);
+            const joinMatch = msg.payload.message.match(/participant (\d+) joined session (\S+)/);
             if (joinMatch) {
-                setters.setJoinedCount(parseInt(joinMatch[1]));
-                setters.setTotalParticipants(parseInt(joinMatch[2]));
+                const joinedSuid = parseInt(joinMatch[1]);
+                const sessionId = joinMatch[2];
+                setters.setPendingSessions((prev: PendingDKGSession[]) => 
+                    prev.map(s => 
+                        s.session === sessionId 
+                            ? { ...s, joined: [...s.joined, joinedSuid] } 
+                            : s
+                    )
+                );
             }
             const disconnectMatch = msg.payload.message.match(/user (\d+) disconnected/i);
             if (disconnectMatch) {
@@ -127,7 +140,12 @@ export const handleServerMessage = async (
         case 'LoginOk':
             setters.setIsServerConnected(true);
             setters.setDkgStatus('Connected');
-            log('success', `Logged in successfully.`);
+            if (msg.payload && msg.payload.suid) {
+                setters.setMySuid(msg.payload.suid);
+                log('success', `Logged in successfully as SUID ${msg.payload.suid}.`);
+            } else {
+                log('success', `Logged in successfully.`);
+            }
             sendMessage(ws.current, { type: 'ListPendingDKGSessions' }, log);
             break;
 
@@ -290,8 +308,10 @@ interface SigningStateSetters {
     setSessionId: React.Dispatch<React.SetStateAction<string>>;
     setSigningStatus: React.Dispatch<React.SetStateAction<SigningStatus>>;
     setPendingSessions: React.Dispatch<React.SetStateAction<PendingSigningSession[]>>;
+    setCompletedSessions: React.Dispatch<React.SetStateAction<CompletedSigningSession[]>>;
     setFinalSignature: React.Dispatch<React.SetStateAction<string>>;
     setIsServerConnected: React.Dispatch<React.SetStateAction<boolean>>;
+    setMySuid: React.Dispatch<React.SetStateAction<number | null>>;
 }
 
 export const handleSigningServerMessage = async (
@@ -340,7 +360,12 @@ export const handleSigningServerMessage = async (
         case 'LoginOk':
             setters.setIsServerConnected(true);
             setters.setSigningStatus('Connected');
-            log('success', `Logged in successfully.`);
+            if (msg.payload && msg.payload.suid) {
+                setters.setMySuid(msg.payload.suid);
+                log('success', `Logged in successfully as SUID ${msg.payload.suid}.`);
+            } else {
+                log('success', `Logged in successfully.`);
+            }
             sendMessage(ws.current, { type: 'ListPendingSigningSessions' }, log);
             break;
 
@@ -363,6 +388,11 @@ export const handleSigningServerMessage = async (
         case 'PendingSigningSessions':
             setters.setPendingSessions(msg.payload.sessions);
             log('info', `Found ${msg.payload.sessions.length} pending signing sessions.`);
+            break;
+
+        case 'CompletedSigningSessions':
+            setters.setCompletedSessions(msg.payload.sessions);
+            log('info', `Found ${msg.payload.sessions.length} completed signing sessions.`);
             break;
 
         case 'SignReadyRound1':
