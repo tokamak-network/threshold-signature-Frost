@@ -20,13 +20,14 @@ It provides a user-friendly interface for creating and joining DKG and signing s
   - A status panel with animated indicators shows the current round of the DKG or signing ceremony.
   - A live-updating table shows which participants have successfully joined a session.
 - **Graceful Disconnection Handling:** The UI updates in real-time if a participant disconnects from a session, and users are provided with a "Disconnect" button.
+- **Draggable & Stacked Modals:** All pop-up modals for viewing session details are draggable, allowing users to move them around the screen. The modals also stack correctly, ensuring the most recently opened window always appears on top.
 
 ## Technology Stack
 
 - **Frontend Framework:** React with TypeScript
 - **Build Tool:** Vite
 - **Web3 Integration:** `wagmi` & `viem` for connecting to MetaMask and signing messages.
-- **Cryptography:** A Rust-based WASM module (`tokamak_frost_wasm`) handles all cryptographic operations, including key generation, signing, and the FROST protocol logic for both DKG and signing.
+- **Cryptography:** a Rust-based WASM module (`tokamak_frost_wasm`) handles all cryptographic operations, including key generation, signing, and the FROST protocol logic for both DKG and signing.
 - **Communication:** Secure WebSockets for real-time communication with the `fserver`.
 
 ## Setup and Usage
@@ -80,16 +81,41 @@ The optimized static files will be placed in the `dist/` directory.
 
 This section details the WebSocket messages exchanged between the web client and the `fserver`.
 
+### How Refreshing Sessions Works
+
+When a user clicks the "Refresh Sessions" button in either the DKG or Signing lobby, the client sends a specific message to the `fserver`. The server then replies with a list of all pending sessions that the authenticated user is a part of.
+
+- **DKG Lobby:**
+  - Client sends: `{"type":"ListPendingDKGSessions"}`
+  - Server responds with: `PendingDKGSessions`
+- **Signing Lobby:**
+  - Client sends: `{"type":"ListPendingSigningSessions"}`
+  - Server responds with: `PendingSigningSessions`
+
+This allows users to see an up-to-date list of available sessions without needing to manually refresh the page.
+
+### How "Completed Sessions" Works
+
+The "Completed Sessions" feature allows users to review the details of past DKG or signing ceremonies they participated in.
+
+1.  **Request:** When the user clicks the "Completed Sessions" button, the client sends a request to the server to fetch all completed sessions for that user.
+    -   **DKG:** `{"type":"ListCompletedDKGSessions"}`
+    -   **Signing:** `{"type":"ListCompletedSigningSessions"}`
+2.  **Response:** The server replies with a list of completed session objects (`CompletedDKGSessions` or `CompletedSigningSessions`).
+3.  **Modal Display:** The client displays these sessions in a "Completed Sessions" modal. This modal is draggable and is assigned a `z-index` to manage its stacking order.
+4.  **Viewing Details:** If the user clicks the "View" button for a specific session in the list, a new "Session Details" modal opens on top of the "Completed Sessions" modal. This is achieved by adding the new modal to a `modalStack` and assigning it a higher `z-index`. Both modals remain open and can be moved independently, allowing for easy comparison.
+
 ### Client to Server (Outgoing)
 
 #### DKG Messages
-- **`AnnounceSession`**: Sent by a creator to initiate a new DKG session.
+- **`AnnounceDKGSession`**: Sent by a creator to initiate a new DKG session.
   - `payload`: `{ group_id: string, min_signers: number, max_signers: number, participants: number[], participants_pubs: [number, string][] }`
 - **`RequestChallenge`**: Sent by any client to request a unique challenge for login.
 - **`Login`**: Sent by a client after signing the challenge.
   - `payload`: `{ challenge: string, pubkey_hex: string, signature_hex: string }`
 - **`ListPendingDKGSessions`**: Sent by a participant to get a list of available DKG sessions to join.
-- **`JoinSession`**: Sent by a participant to join a specific DKG session from the lobby.
+- **`ListCompletedDKGSessions`**: Sent to get a list of completed DKG sessions.
+- **`JoinDKGSession`**: Sent by a participant to join a specific DKG session from the lobby.
   - `payload`: `{ session: string }`
 - **`Round1Submit`**: Sent by each participant to submit their public DKG share for Round 1.
   - `payload`: `{ session: string, id_hex: string, pkg_bincode_hex: string, sig_ecdsa_hex: string }`
@@ -100,8 +126,9 @@ This section details the WebSocket messages exchanged between the web client and
 
 #### Interactive Signing Messages
 - **`AnnounceSignSession`**: Sent by a creator to initiate a new signing session.
-  - `payload`: `{ group_id: string, threshold: number, participants: number[], participants_pubs: [number, string][], group_vk_sec1_hex: string, message_hex: string }`
+  - `payload`: `{ group_id: string, threshold: number, participants: number[], participants_pubs: [number, string][], group_vk_sec1_hex: string, message: string, message_hex: string }`
 - **`ListPendingSigningSessions`**: Sent by a participant to get a list of available signing sessions to join.
+- **`ListCompletedSigningSessions`**: Sent to get a list of completed signing sessions.
 - **`JoinSignSession`**: Sent by a participant to join a specific signing session.
   - `payload`: `{ session: string, signer_id_bincode_hex: string, verifying_share_bincode_hex: string }`
 - **`SignRound1Submit`**: Sent by a participant to submit their signing commitments.
@@ -112,14 +139,16 @@ This section details the WebSocket messages exchanged between the web client and
 ### Server to Client (Incoming)
 
 #### General & DKG Messages
-- **`SessionCreated`**: Sent to the creator after they successfully announce a new DKG session.
+- **`DKGSessionCreated`**: Sent to the creator after they successfully announce a new DKG session.
   - `payload`: `{ session: string }`
 - **`Challenge`**: Sent to a client in response to `RequestChallenge`.
   - `payload`: `{ challenge: string }`
 - **`LoginOk`**: Sent to a client after a successful login.
   - `payload`: `{ principal: string, access_token: string }`
 - **`PendingDKGSessions`**: Sent to a participant in response to `ListPendingDKGSessions`.
-  - `payload`: `{ sessions: { session: string, group_id: string, min_signers: number, max_signers: number, participants: number[], joined: number[], created_at: string }[] }`
+  - `payload`: `{ sessions: PendingDKGSession[] }`
+- **`CompletedDKGSessions`**: Sent in response to `ListCompletedDKGSessions`.
+  - `payload`: `{ sessions: CompletedDKGSession[] }`
 - **`Info`**: A general-purpose message used to provide feedback.
   - `payload`: `{ message: string }` (e.g., `"user 2 joined..."`, `"user 1 disconnected..."`)
 - **`Error`**: Sent when an operation fails or a message is invalid.
@@ -139,10 +168,70 @@ This section details the WebSocket messages exchanged between the web client and
 - **`SignSessionCreated`**: Sent to the creator after they successfully announce a new signing session.
   - `payload`: `{ session: string }`
 - **`PendingSigningSessions`**: Sent to a participant in response to `ListPendingSigningSessions`.
-  - `payload`: `{ sessions: { session: string, group_id: string, threshold: number, participants: number[], joined: number[], message_hex: string, participants_pubs: [number, string][], created_at: string }[] }`
+  - `payload`: `{ sessions: PendingSigningSession[] }`
+- **`CompletedSigningSessions`**: Sent in response to `ListCompletedSigningSessions`.
+  - `payload`: `{ sessions: CompletedSigningSession[] }`
 - **`SignReadyRound1`**: Broadcast when all participants have joined a signing session.
   - `payload`: `{ session: string, group_id: string, threshold: number, participants: number, msg_keccak32_hex: string, roster: [number, string, string][] }`
 - **`SignSigningPackage`**: Broadcast after a threshold of participants have submitted their Round 1 commitments.
   - `payload`: `{ session: string, signing_package_bincode_hex: string }`
 - **`SignatureReady`**: Broadcast to all participants after the server has aggregated a threshold of signature shares.
   - `payload`: `{ session: string, signature_bincode_hex: string, px: string, py: string, rx: string, ry: string, s: string, message: string }`
+
+### Data Structures
+
+#### `PendingDKGSession`
+| Attribute | Type | Description |
+| :--- | :--- | :--- |
+| `session` | `String` | The unique identifier for the session. |
+| `creator_suid` | `u32` | The session-unique ID (SUID) of the participant who created the session. |
+| `group_id` | `String` | A user-defined name for the group. |
+| `min_signers` | `u16` | The threshold (`t`) of signers required for the final group key. |
+| `max_signers` | `u16` | The total number (`n`) of participants in the ceremony. |
+| `participants` | `Vec<u32>` | A list of all SUIDs that are part of the session roster. |
+| `participants_pubs` | `Vec<(u32, String)>` | A list of tuples containing the SUID and corresponding roster public key for each participant. |
+| `joined` | `Vec<u32>` | A list of SUIDs of participants who have already joined the session. |
+| `created_at` | `String` | The ISO 8601 timestamp of when the session was created. |
+
+#### `CompletedDKGSession`
+| Attribute | Type | Description |
+| :--- | :--- | :--- |
+| `session` | `String` | The unique identifier for the session. |
+| `creator_suid` | `u32` | The SUID of the participant who created the session. |
+| `group_id` | `String` | A user-defined name for the group. |
+| `min_signers` | `u16` | The threshold (`t`) of signers. |
+| `max_signers` | `u16` | The total number (`n`) of participants. |
+| `participants` | `Vec<u32>` | A list of all SUIDs that were part of the session. |
+| `participants_pubs` | `Vec<(u32, String)>` | A list of tuples containing the SUID and roster public key for each participant. |
+| `joined` | `Vec<u32>` | A list of SUIDs of participants who joined the session. |
+| `created_at` | `String` | The ISO 8601 timestamp of when the session was created. |
+| `group_key` | `String` | The final, aggregated group public key generated by the DKG. |
+
+#### `PendingSigningSession`
+| Attribute | Type | Description |
+| :--- | :--- | :--- |
+| `session` | `String` | The unique identifier for the session. |
+| `creator_suid` | `u32` | The SUID of the participant who created the session. |
+| `group_id` | `String` | The ID of the group that this signing session is for. |
+| `threshold` | `u16` | The number of participants required to create the signature. |
+| `participants` | `Vec<u32>` | A list of all SUIDs that are part of the session roster. |
+| `joined` | `Vec<u32>` | A list of SUIDs of participants who have already joined the session. |
+| `message` | `String` | The original, human-readable message to be signed. |
+| `message_hex` | `String` | The Keccak256 hash of the message that will actually be signed. |
+| `participants_pubs` | `Vec<(u32, String)>` | A list of tuples containing the SUID and roster public key for each participant. |
+| `created_at` | `String` | The ISO 8601 timestamp of when the session was created. |
+
+#### `CompletedSigningSession`
+| Attribute | Type | Description |
+| :--- | :--- | :--- |
+| `session` | `String` | The unique identifier for the session. |
+| `creator_suid` | `u32` | The SUID of the participant who created the session. |
+| `group_id` | `String` | The ID of the group. |
+| `threshold` | `u16` | The number of participants required for the signature. |
+| `participants` | `Vec<u32>` | A list of all SUIDs that were part of the session. |
+| `joined` | `Vec<u32>` | A list of SUIDs of participants who joined the session. |
+| `message` | `String` | The original, human-readable message that was signed. |
+| `message_hex` | `String` | The Keccak256 hash of the message. |
+| `participants_pubs` | `Vec<(u32, String)>` | A list of tuples containing the SUID and roster public key for each participant. |
+| `created_at` | `String` | The ISO 8601 timestamp of when the session was created. |
+| `signature` | `String` | The final, aggregated signature in bincode hex format. |

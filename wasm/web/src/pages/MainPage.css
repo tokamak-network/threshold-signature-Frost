@@ -8,9 +8,9 @@
 }
 
 .main-page-container .App-header {
+    flex-direction: column;
     border-bottom: none;
     margin-bottom: 3rem;
-    text-align: center;
 }
 
 .ceremony-selection {
@@ -36,7 +36,7 @@
 
 .ceremony-button:hover {
     transform: translateY(-5px);
-    box-shadow: 0 8px 15px rgba(0, 0, 0, 0.1);
+    box-schadow: 0 8px 15px rgba(0, 0, 0, 0.1);
 }
 
 .ceremony-button h2 {

@@ -1,4 +1,3 @@
-import React from 'react';
 import { Link } from 'react-router-dom';
 import './MainPage.css';
 
@@ -7,7 +6,9 @@ const MainPage = () => {
         <div className="main-page-container">
             <header className="App-header">
                 <h1>Tokamak-FROST</h1>
-                <p>A web-based client for FROST Distributed Key Generation and Signing Ceremonies.</p>
+                <p>
+                    A web-based client for FROST Distributed Key Generation and Signing Ceremonies.
+                </p>
             </header>
             <div className="ceremony-selection">
                 <Link to="/dkg" className="ceremony-button">

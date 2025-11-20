@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import toast, { Toaster } from 'react-hot-toast';
-import type { SigningStatus, LogEntry, Participant, PendingSigningSession } from '../types';
+import type { SigningStatus, LogEntry, PendingSigningSession, CompletedSigningSession } from '../types';
 import { handleSigningServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from '../lib';
 import init, { get_signing_prerequisites, get_key_package_metadata, keccak256 } from '../../../pkg/tokamak_frost_wasm.js';
 import '../App.css';
+import { useModal } from '../useModal';
 
 // ====================================================================
 // region: Helper Components
@@ -24,7 +25,9 @@ const WalletSwitch = ({ isConnected, address, onConnect, onDisconnect }: { isCon
     );
 };
 
-const SessionDetailsModal = ({ session, onClose }: { session: PendingSigningSession | null, onClose: () => void }) => {
+const SessionDetailsModal = ({ session, onClose, zIndex }: { session: PendingSigningSession | CompletedSigningSession | null, onClose: () => void, zIndex: number }) => {
+    const { position, modalRef, onMouseDown, onMouseMove, onMouseUp } = useModal();
+
     if (!session) return null;
 
     const handleCopy = (text: string) => {
@@ -33,8 +36,13 @@ const SessionDetailsModal = ({ session, onClose }: { session: PendingSigningSess
     };
 
     return (
-        <div className="modal-overlay">
-            <div className="modal-content session-details-modal">
+        <div className="modal-overlay" style={{ zIndex }} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+            <div
+                ref={modalRef}
+                className="modal-content session-details-modal"
+                style={{ top: position.y, left: position.x, cursor: 'move' }}
+                onMouseDown={onMouseDown}
+            >
                 <h2>Session Details</h2>
                 <div className="detail-row">
                     <strong>Session ID:</strong>
@@ -45,9 +53,19 @@ const SessionDetailsModal = ({ session, onClose }: { session: PendingSigningSess
                     <span>{session.group_id}</span>
                 </div>
                 <div className="detail-row">
+                    <strong>Message:</strong>
+                    <span>{session.message}</span>
+                </div>
+                <div className="detail-row">
                     <strong>Message Hash (Hex):</strong>
                     <code>{session.message_hex}</code>
                 </div>
+                {'signature' in session && (
+                    <div className="detail-row">
+                        <strong>Final Signature:</strong>
+                        <textarea readOnly value={(session as CompletedSigningSession).signature} rows={4}></textarea>
+                    </div>
+                )}
                 <div className="detail-row">
                     <strong>Participants:</strong>
                     <table className="participant-table">
@@ -62,7 +80,7 @@ const SessionDetailsModal = ({ session, onClose }: { session: PendingSigningSess
                         <tbody>
                             {session.participants_pubs.map(([suid, pubkey]) => (
                                 <tr key={suid}>
-                                    <td>{suid}</td>
+                                    <td>{suid}{session.creator_suid === suid ? ' (Creator)' : ''}</td>
                                     <td><code title={pubkey}>{`${pubkey.slice(0, 10)}...${pubkey.slice(-8)}`}</code></td>
                                     <td>
                                         <button onClick={() => handleCopy(pubkey)} className="copy-button">
@@ -87,6 +105,48 @@ const SessionDetailsModal = ({ session, onClose }: { session: PendingSigningSess
     );
 };
 
+const CompletedSessionsModal = ({ sessions, onClose, onSelect, zIndex }: { sessions: CompletedSigningSession[], onClose: () => void, onSelect: (session: CompletedSigningSession) => void, zIndex: number }) => {
+    const { position, modalRef, onMouseDown, onMouseMove, onMouseUp } = useModal();
+
+    if (sessions.length === 0) return null;
+
+    return (
+        <div className="modal-overlay" style={{ zIndex }} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+            <div
+                ref={modalRef}
+                className="modal-content session-details-modal"
+                style={{ top: position.y, left: position.x, cursor: 'move' }}
+                onMouseDown={onMouseDown}
+            >
+                <h2>Completed Signing Sessions</h2>
+                <table className="sessions-table">
+                    <thead>
+                        <tr>
+                            <th>Session ID</th>
+                            <th>Group</th>
+                            <th>Message</th>
+                            <th>Created</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sessions.map(s => (
+                            <tr key={s.session}>
+                                <td><code>{s.session.slice(0, 8)}...</code></td>
+                                <td>{s.group_id}</td>
+                                <td>{s.message}</td>
+                                <td>{new Date(s.created_at).toLocaleString()}</td>
+                                <td><button className="grey-button" onClick={() => onSelect(s)}>View</button></td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                <button onClick={onClose} className="grey-button">Close</button>
+            </div>
+        </div>
+    );
+};
+
 // ====================================================================
 // region: Main Signing Page Component
 // ====================================================================
@@ -105,6 +165,7 @@ function SigningPage() {
     const [publicKey, setPublicKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [keyPackage, setKeyPackage] = useState('');
+    const [mySuid, setMySuid] = useState<number | null>(null);
 
     // --- State for Signing Ceremony ---
     const [isCreator, setIsCreator] = useState(false);
@@ -114,13 +175,17 @@ function SigningPage() {
     const [messageToSign, setMessageToSign] = useState('hello frost');
     const [messageHash, setMessageHash] = useState('');
     const [groupVk, setGroupVk] = useState('');
+    // @ts-expect-error
     const [sessionId, setSessionId] = useState('');
     const sessionIdRef = useRef('');
     const [signingStatus, setSigningStatus] = useState<SigningStatus>('Idle');
     const [pendingSessions, setPendingSessions] = useState<PendingSigningSession[]>([]);
+    const [completedSessions, setCompletedSessions] = useState<CompletedSigningSession[]>([]);
     const [finalSignature, setFinalSignature] = useState('');
     const [joiningSessionId, setJoiningSessionId] = useState<string | null>(null);
-    const [viewingSession, setViewingSession] = useState<PendingSigningSession | null>(null);
+    const [viewingSession, setViewingSession] = useState<PendingSigningSession | CompletedSigningSession | null>(null);
+    const [showCompleted, setShowCompleted] = useState(false);
+    const [modalStack, setModalStack] = useState<string[]>([]);
 
     // --- State for Logs ---
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -137,20 +202,23 @@ function SigningPage() {
     }, []);
 
     useEffect(() => {
-        if (keyPackage.trim() !== '') {
+        if (keyPackage.trim() !== '' && publicKey) {
             try {
                 const metadata = JSON.parse(get_key_package_metadata(keyPackage));
                 setGroupId(metadata.group_id);
                 setThreshold(metadata.threshold.toString());
                 setGroupVk(metadata.group_public_key);
-                const pubkeys = Object.values(metadata.roster);
-                setRoster(pubkeys as string[]);
+                const pubkeys = Object.values(metadata.roster) as string[];
+                if (!pubkeys.includes(publicKey)) {
+                    pubkeys.unshift(publicKey);
+                }
+                setRoster(pubkeys);
                 toast.success('Key package metadata loaded!');
             } catch (e: any) {
                 toast.error(`Invalid key package: ${e.message}`);
             }
         }
-    }, [keyPackage]);
+    }, [keyPackage, publicKey]);
 
     useEffect(() => {
         try {
@@ -163,17 +231,31 @@ function SigningPage() {
 
     useEffect(() => {
         if (viewingSession) {
-            const updatedSession = pendingSessions.find(s => s.session === viewingSession.session);
+            const allSessions = [...pendingSessions, ...completedSessions];
+            const updatedSession = allSessions.find(s => s.session === viewingSession.session);
             if (updatedSession) {
                 setViewingSession(updatedSession);
             }
         }
-    }, [pendingSessions, viewingSession]);
+    }, [pendingSessions, completedSessions, viewingSession]);
 
     // --- Logging ---
     const log = (level: LogEntry['level'], message: string) => {
         console.log(`[${level.toUpperCase()}] ${message}`);
         setLogs(prev => [...prev, { level, message }]);
+    };
+
+    // --- Modal Management ---
+    const openModal = (modalId: string) => {
+        setModalStack(prev => [...prev, modalId]);
+    };
+
+    const closeModal = (modalId: string) => {
+        setModalStack(prev => prev.filter(id => id !== modalId));
+    };
+
+    const getZIndex = (modalId: string) => {
+        return modalStack.indexOf(modalId) + 100;
     };
 
     // --- Core Functions ---
@@ -227,8 +309,10 @@ function SigningPage() {
                 setSessionId,
                 setSigningStatus,
                 setPendingSessions,
+                setCompletedSessions,
                 setFinalSignature,
                 setIsServerConnected,
+                setMySuid,
             }, log, ws);
         };
 
@@ -272,6 +356,7 @@ function SigningPage() {
                 participants,
                 participants_pubs,
                 group_vk_sec1_hex: groupVk,
+                message: messageToSign,
                 message_hex: messageHash,
             }
         }, log);
@@ -295,15 +380,59 @@ function SigningPage() {
                     verifying_share_bincode_hex: prereqs.verifying_share_bincode_hex,
                 }
             }, log);
+
+            if (mySuid) {
+                setPendingSessions((prev: PendingSigningSession[]) => 
+                    prev.map(s => 
+                        s.session === session 
+                            ? { ...s, joined: [...s.joined, mySuid] } 
+                            : s
+                    )
+                );
+            }
         } catch (e: any) {
             toast.error(`Failed to process key package: ${e.message}`);
         }
     };
 
+    const handleViewCompleted = () => {
+        log('info', 'Fetching list of completed signing sessions...');
+        sendMessage(ws.current, { type: 'ListCompletedSigningSessions' }, log);
+        setShowCompleted(true);
+        openModal('completed');
+    };
+
+    const handleViewSessionDetails = (session: PendingSigningSession | CompletedSigningSession) => {
+        setViewingSession(session);
+        openModal('details');
+    };
+
     return (
         <div className="App">
             <Toaster position="top-center" reverseOrder={false} />
-            <SessionDetailsModal session={viewingSession} onClose={() => setViewingSession(null)} />
+            {viewingSession && (
+                <SessionDetailsModal
+                    session={viewingSession}
+                    onClose={() => {
+                        setViewingSession(null);
+                        closeModal('details');
+                    }}
+                    zIndex={getZIndex('details')}
+                />
+            )}
+            {showCompleted && (
+                <CompletedSessionsModal
+                    sessions={completedSessions}
+                    onClose={() => {
+                        setShowCompleted(false);
+                        closeModal('completed');
+                    }}
+                    onSelect={(s) => {
+                        handleViewSessionDetails(s);
+                    }}
+                    zIndex={getZIndex('completed')}
+                />
+            )}
             <header className="App-header">
                 <h1>Tokamak-FROST Signing Ceremony</h1>
                 <WalletSwitch
@@ -403,12 +532,15 @@ function SigningPage() {
                                     </tbody>
                                 </table>
                             </div>
-                            <button onClick={handleAnnounceSigning} className="grey-button" disabled={!isServerConnected || keyPackage.trim() === '' || signingStatus !== 'Connected'}>Announce Signing Session</button>
+                            <button onClick={handleAnnounceSigning} className="grey-button" disabled={!isServerConnected || keyPackage.trim() === '' || signingStatus !== 'Connected' || messageHash.trim() === ''}>Announce Signing Session</button>
                         </div>
                     ) : (
                         <div className="participant-panel">
                             <h3>Join Existing Session</h3>
-                            <button onClick={() => sendMessage(ws.current, { type: 'ListPendingSigningSessions' }, log)} className="grey-button" disabled={!isServerConnected}>Refresh Sessions</button>
+                            <div className="button-group">
+                                <button onClick={() => sendMessage(ws.current, { type: 'ListPendingSigningSessions' }, log)} className="grey-button" disabled={!isServerConnected}>Refresh Sessions</button>
+                                <button onClick={handleViewCompleted} className="grey-button" disabled={!isServerConnected}>Completed Sessions</button>
+                            </div>
                             {pendingSessions.length > 0 && (
                                 <table className="sessions-table">
                                     <thead>
@@ -422,7 +554,7 @@ function SigningPage() {
                                     <tbody>
                                         {pendingSessions.map(s => (
                                             <tr key={s.session}>
-                                                <td><button className="link-button" onClick={() => setViewingSession(s)}>{s.session.slice(0, 8)}...</button></td>
+                                                <td><button className="link-button" onClick={() => handleViewSessionDetails(s)}>{s.session.slice(0, 8)}...</button></td>
                                                 <td>{s.group_id}</td>
                                                 <td>{new Date(s.created_at).toLocaleString()}</td>
                                                 <td><button onClick={() => handleJoinSession(s.session)} className="grey-button" disabled={joiningSessionId !== null || keyPackage.trim() === ''}>Join</button></td>

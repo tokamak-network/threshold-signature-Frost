@@ -128,7 +128,7 @@ enum Command {
 #[serde(tag = "type", content = "payload")]
 enum ClientMsg {
     /// Creator announces parameters; server generates a unique session id.
-    AnnounceSession {
+    AnnounceDKGSession {
         min_signers: u16,
         max_signers: u16,
         group_id: String,
@@ -142,13 +142,15 @@ enum ClientMsg {
         signature_hex: String,
     },
     Logout,
-    JoinSession {
+    JoinDKGSession {
         session: String,
     },
     /// List DKG sessions the caller can join (still pending/finalizing)
     ListPendingDKGSessions,
+    ListCompletedDKGSessions,
     /// List Signing sessions the caller can join (still pending/not all joined)
     ListPendingSigningSessions,
+    ListCompletedSigningSessions,
 
     // DKG round messages
     Round1Submit {
@@ -177,7 +179,7 @@ enum ClientMsg {
         participants: Vec<u32>,
         participants_pubs: Vec<(u32, String)>,
         group_vk_sec1_hex: String,
-        // message bytes, as hex (0x... or plain hex)
+        message: String,
         message_hex: String,
     },
     JoinSignSession {
@@ -206,15 +208,17 @@ enum ServerMsg {
     Info { message: String },
     Challenge { challenge: String },
     // principal = compressed SEC1 hex of the user's long-term roster key
-    LoginOk { principal: String, access_token: String },
+    LoginOk { principal: String, suid: u32, access_token: String },
 
     /// Returned in response to ClientMsg::ListPendingDKGSessions
     PendingDKGSessions { sessions: Vec<PendingDKGSession> },
+    CompletedDKGSessions { sessions: Vec<CompletedDKGSession> },
     /// Returned in response to ClientMsg::ListPendingSigningSessions
     PendingSigningSessions { sessions: Vec<PendingSignSession> },
+    CompletedSigningSessions { sessions: Vec<CompletedSigningSession> },
 
-    /// Sent to the creator after a successful AnnounceSession
-    SessionCreated { session: String },
+    /// Sent to the creator after a successful AnnounceDKGSession
+    DKGSessionCreated { session: String },
 
     // Signals
     ReadyRound1 {
@@ -270,25 +274,58 @@ enum ServerMsg {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PendingDKGSession {
     session: String,
+    creator_suid: u32,
     group_id: String,
     min_signers: u16,
     max_signers: u16,
     participants: Vec<u32>,
+    participants_pubs: Vec<(u32, String)>,
     joined: Vec<u32>,
     created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct CompletedDKGSession {
+    session: String,
+    creator_suid: u32,
+    group_id: String,
+    min_signers: u16,
+    max_signers: u16,
+    participants: Vec<u32>,
+    participants_pubs: Vec<(u32, String)>,
+    joined: Vec<u32>,
+    created_at: String,
+    group_vk_sec1_hex: String,
 }
 
 // Used by ServerMsg::PendingSigningSessions
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PendingSignSession {
     session: String,
+    creator_suid: u32,
     group_id: String,
     threshold: u16,
     participants: Vec<u32>,
     joined: Vec<u32>,
+    message: String,
     message_hex: String,
     participants_pubs: Vec<(u32, String)>,
     created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct CompletedSigningSession {
+    session: String,
+    creator_suid: u32,
+    group_id: String,
+    threshold: u16,
+    participants: Vec<u32>,
+    joined: Vec<u32>,
+    message: String,
+    message_hex: String,
+    participants_pubs: Vec<(u32, String)>,
+    created_at: String,
+    signature: String,
 }
 
 
@@ -311,14 +348,19 @@ struct Inner {
     challenges: HashSet<String>,
     // active tokens
     active_tokens: HashMap<String, String>, // token -> principal
-    // sessions
-    sessions: HashMap<String, Session>,
+    // dkg sessions
+    sessions: HashMap<String, DKGSession>,
+    completed_dkg_sessions: HashMap<String, CompletedDKGSession>,
     // signing sessions
     sign_sessions: HashMap<String, SignSession>,
+    completed_sign_sessions: HashMap<String, CompletedSigningSession>,
+    // SUID counter
+    next_suid: u32,
 }
 
-struct Session {
+struct DKGSession {
     session: String,
+    creator_suid: u32,
     min_signers: u16,
     max_signers: u16,
     group_id: String,
@@ -356,11 +398,13 @@ struct Session {
 
 struct SignSession {
     session: String,
+    creator_suid: u32,
     group_id: String,
     threshold: u16,
     created_at: DateTime<Utc>,
     participants: Vec<u32>,
     participants_pubs: Vec<(u32, String)>,
+    message: String,
 
     // session-local identity maps
     suid_to_principal: BTreeMap<u32, String>,
@@ -394,7 +438,10 @@ impl Default for Inner {
             challenges: HashSet::new(),
             active_tokens: HashMap::new(),
             sessions: HashMap::new(),
+            completed_dkg_sessions: HashMap::new(),
             sign_sessions: HashMap::new(),
+            completed_sign_sessions: HashMap::new(),
+            next_suid: 1,
         }
     }
 }
@@ -625,14 +672,17 @@ async fn handle_client_text(
     txt: String,
 ) -> Result<()> {
     let cmsg: ClientMsg = serde_json::from_str(&txt).context("parse client msg")?;
+    let principal = principal_hex.as_ref().cloned();
+
     match cmsg {
-        ClientMsg::AnnounceSession {
+        ClientMsg::AnnounceDKGSession {
             min_signers,
             max_signers,
             group_id,
             participants,
             participants_pubs,
         } => {
+            let principal = principal.ok_or_else(|| anyhow!("must be logged in to announce"))?;
             let mut inner = state.inner.lock().await;
             if participants.len() != max_signers as usize {
                 return Err(anyhow!("participants length must equal max_signers"));
@@ -648,11 +698,11 @@ async fn handle_client_text(
                 let pk_bytes = hex::decode(pk_hex).context("roster pubkey hex")?;
                 let vk = EcdsaVerifyingKey::from_sec1_bytes(&pk_bytes)
                     .map_err(|_| anyhow!("bad ECDSA pub for suid {}", suid))?;
-                let principal = hex::encode(vk.to_encoded_point(true).as_bytes());
-                if principal_to_suid.insert(principal.clone(), *suid).is_some() {
+                let p_principal = hex::encode(vk.to_encoded_point(true).as_bytes());
+                if principal_to_suid.insert(p_principal.clone(), *suid).is_some() {
                     return Err(anyhow!("principal appears more than once in the session roster"));
                 }
-                suid_to_principal.insert(*suid, principal);
+                suid_to_principal.insert(*suid, p_principal);
                 session_ecdsa_pubs.insert(*suid, vk);
             }
 
@@ -660,14 +710,18 @@ async fn handle_client_text(
                 return Err(anyhow!("participants_pubs must include all suids"));
             }
 
+            // Ensure the announcer is in the participant list
+            let creator_suid = *principal_to_suid.get(&principal).ok_or_else(|| anyhow!("announcer must be a participant"))?;
+
             // build id map 1..=n based on order
             let mut idmap = HashMap::new();
             for (i, suid) in participants.iter().enumerate() {
                 let fid: frost::Identifier = ((i + 1) as u16).try_into().unwrap();
                 idmap.insert(*suid, fid);
             }
-            let session_obj = Session {
+            let session_obj = DKGSession {
                 session: session.clone(),
+                creator_suid,
                 min_signers,
                 max_signers,
                 group_id,
@@ -686,12 +740,12 @@ async fn handle_client_text(
                 r2_sigs: BTreeMap::new(),
             };
             inner.sessions.insert(session.clone(), session_obj);
-            println!("[server] Announced session '{}'", session);
+            println!("[server] Announced DKG session '{}'", session);
             // Start a 3-minute timeout for this DKG session
             start_session_timeout(state.clone(), session.clone(), false);
 
             // Reply to creator with the session id
-            let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::SessionCreated {
+            let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::DKGSessionCreated {
                 session,
             })?));
         }
@@ -721,33 +775,37 @@ async fn handle_client_text(
                 .map_err(|_| anyhow!("ECDSA signature verification failed"))?;
 
             // Canonical principal = compressed SEC1 hex of verified key
-            let principal = hex::encode(vk.to_encoded_point(true).as_bytes());
+            let p = hex::encode(vk.to_encoded_point(true).as_bytes());
 
             // Allow re-authentication by removing existing connection
-            if inner.conns.contains_key(&principal) {
-                println!("[server] principal {} already logged in, allowing re-authentication", principal);
-                inner.conns.remove(&principal);
+            if inner.conns.contains_key(&p) {
+                println!("[server] principal {} already logged in, allowing re-authentication", p);
+                inner.conns.remove(&p);
                 // Also clean up any existing tokens for this principal
-                inner.active_tokens.retain(|_, p| p != &principal);
+                inner.active_tokens.retain(|_, val| val != &p);
             }
 
             let token = Uuid::new_v4().to_string();
-            inner.active_tokens.insert(token.clone(), principal.clone());
+            inner.active_tokens.insert(token.clone(), p.clone());
 
-            println!("[server] login successful for principal {}", principal);
-            inner.conns.insert(principal.clone(), tx.clone());
-            *principal_hex = Some(principal.clone());
+            println!("[server] login successful for principal {}", p);
+            inner.conns.insert(p.clone(), tx.clone());
+            *principal_hex = Some(p.clone());
             *access_token = Some(token.clone());
 
+            let suid = inner.next_suid;
+            inner.next_suid += 1;
+
             let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::LoginOk {
-                principal,
+                principal: p,
+                suid,
                 access_token: token,
             })?));
         }
         ClientMsg::Logout => {
-            if let Some(principal) = principal_hex {
+            if let Some(p) = principal {
                 let mut inner = state.inner.lock().await;
-                inner.conns.remove(principal);
+                inner.conns.remove(&p);
                 if let Some(token) = access_token {
                     inner.active_tokens.remove(token);
                 }
@@ -758,8 +816,8 @@ async fn handle_client_text(
                 })?));
             }
         }
-        ClientMsg::JoinSession { session } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+        ClientMsg::JoinDKGSession { session } => {
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
 
             // Variables to use after dropping borrow
@@ -778,7 +836,7 @@ async fn handle_client_text(
                 let s = inner
                     .sessions
                     .get_mut(&session)
-                    .ok_or_else(|| anyhow!("unknown session"))?;
+                    .ok_or_else(|| anyhow!("unknown DKG session"))?;
 
                 let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in allowed participants"))?;
                 s.joined.insert(suid);
@@ -865,22 +923,29 @@ async fn handle_client_text(
             }
         }
         ClientMsg::ListPendingDKGSessions => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
 
             let sessions_payload: Vec<PendingDKGSession> = {
                 let inner = state.inner.lock().await;
                 inner
                     .sessions
                     .values()
-                    .filter(|s| s.principal_to_suid.contains_key(principal) && s.finalized_uids.len() < s.participants.len())
-                    .map(|s| PendingDKGSession {
-                        session: s.session.clone(),
-                        group_id: s.group_id.clone(),
-                        min_signers: s.min_signers,
-                        max_signers: s.max_signers,
-                        participants: s.participants.clone(),
-                        joined: s.joined.iter().copied().collect(),
-                        created_at: s.created_at.to_rfc3339(),
+                    .filter(|s| s.principal_to_suid.contains_key(&principal) && s.finalized_uids.len() < s.participants.len())
+                    .map(|s| {
+                        let participants_pubs = s.suid_to_principal.iter().map(|(suid, principal)| {
+                            (*suid, principal.clone())
+                        }).collect();
+                        PendingDKGSession {
+                            session: s.session.clone(),
+                            creator_suid: s.creator_suid,
+                            group_id: s.group_id.clone(),
+                            min_signers: s.min_signers,
+                            max_signers: s.max_signers,
+                            participants: s.participants.clone(),
+                            participants_pubs,
+                            joined: s.joined.iter().copied().collect(),
+                            created_at: s.created_at.to_rfc3339(),
+                        }
                     })
                     .collect()
             };
@@ -890,23 +955,41 @@ async fn handle_client_text(
             ));
         }
 
+        ClientMsg::ListCompletedDKGSessions => {
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
+            let sessions_payload: Vec<CompletedDKGSession> = {
+                let inner = state.inner.lock().await;
+                inner
+                    .completed_dkg_sessions
+                    .values()
+                    .filter(|s| s.participants_pubs.iter().any(|(_, p)| p == &principal))
+                    .cloned()
+                    .collect()
+            };
+            let _ = tx.send(Message::Text(
+                serde_json::to_string(&ServerMsg::CompletedDKGSessions { sessions: sessions_payload })?
+            ));
+        }
+
         ClientMsg::ListPendingSigningSessions => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?;
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
 
             let sessions_payload: Vec<PendingSignSession> = {
                 let inner = state.inner.lock().await;
                 inner
                     .sign_sessions
                     .values()
-                    .filter(|s| s.principal_to_suid.contains_key(principal) && s.joined.len() < s.participants.len())
+                    .filter(|s| s.principal_to_suid.contains_key(&principal) && s.joined.len() < s.participants.len())
                     .map(|s| {
                         let msg32_hex = hex::encode(s.msg32);
                         PendingSignSession {
                             session: s.session.clone(),
+                            creator_suid: s.creator_suid,
                             group_id: s.group_id.clone(),
                             threshold: s.threshold,
                             participants: s.participants.clone(),
                             joined: s.joined.iter().copied().collect(),
+                            message: s.message.clone(),
                             message_hex: msg32_hex,
                             participants_pubs: s.participants_pubs.clone(),
                             created_at: s.created_at.to_rfc3339(),
@@ -919,8 +1002,25 @@ async fn handle_client_text(
                 serde_json::to_string(&ServerMsg::PendingSigningSessions { sessions: sessions_payload })?
             ));
         }
+
+        ClientMsg::ListCompletedSigningSessions => {
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
+            let sessions_payload: Vec<CompletedSigningSession> = {
+                let inner = state.inner.lock().await;
+                inner
+                    .completed_sign_sessions
+                    .values()
+                    .filter(|s| s.participants_pubs.iter().any(|(_, p)| p == &principal))
+                    .cloned()
+                    .collect()
+            };
+            let _ = tx.send(Message::Text(
+                serde_json::to_string(&ServerMsg::CompletedSigningSessions { sessions: sessions_payload })?
+            ));
+        }
+
         ClientMsg::Round1Submit { session, id_hex, pkg_bincode_hex, sig_ecdsa_hex } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
 
             let packages: Vec<(String, String, String)>;
@@ -931,7 +1031,7 @@ async fn handle_client_text(
                 let s = inner
                     .sessions
                     .get_mut(&session)
-                    .ok_or_else(|| anyhow!("unknown session"))?;
+                    .ok_or_else(|| anyhow!("unknown DKG session"))?;
 
                 let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
@@ -983,7 +1083,7 @@ async fn handle_client_text(
             }
         }
         ClientMsg::Round2Submit { session, id_hex, pkgs_cipher_hex } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
             // Stage targeted Round2 broadcasts to avoid E0502 (mutable borrow of session while reading inner.conns)
             let mut dispatch_msgs: Vec<(String, ServerMsg)> = Vec::new();
@@ -991,7 +1091,7 @@ async fn handle_client_text(
                 let s = inner
                     .sessions
                     .get_mut(&session)
-                    .ok_or_else(|| anyhow!("unknown session"))?;
+                    .ok_or_else(|| anyhow!("unknown DKG session"))?;
                 let from_id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
                 let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
                 let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no frost id for suid"))?;
@@ -1096,15 +1196,19 @@ async fn handle_client_text(
 
         }
         ClientMsg::FinalizeSubmit { session, id_hex, group_vk_sec1_hex, sig_ecdsa_hex } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
 
+            let mut should_finalize = false;
+
+            // Scope for validation and checking if finalization is ready
             {
                 let s = inner
                     .sessions
                     .get_mut(&session)
-                    .ok_or_else(|| anyhow!("unknown session"))?;
-                // verify signed finalize
+                    .ok_or_else(|| anyhow!("unknown DKG session"))?;
+
+                // Verify signed finalize message
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
                 let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
                 let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no frost id for suid"))?;
@@ -1140,24 +1244,46 @@ async fn handle_client_text(
                 );
 
                 if s.finalized_uids.len() == s.participants.len() {
-                    let session_name = s.session.clone();
-                    let recipients: Vec<String> = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
-                    let finalized_vk = s.agreed_vk.clone();
+                    should_finalize = true;
+                }
+            } // Mutable borrow of `s` (and `inner`) ends here
 
-                    if let Some(vk) = finalized_vk {
-                        for p in recipients {
-                            if let Some(tx_i) = inner.conns.get(&p) {
-                                let msg = ServerMsg::Finalized { session: session_name.clone(), group_vk_sec1_hex: vk.clone() };
+            if should_finalize {
+                // Now that the mutable borrow is released, we can remove the session
+                if let Some(s) = inner.sessions.remove(&session) {
+                    if let Some(vk) = s.agreed_vk.clone() {
+                        // Broadcast Finalized message to all participants
+                        let recipients: Vec<String> = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
+                        for p in &recipients {
+                            if let Some(tx_i) = inner.conns.get(p) {
+                                let msg = ServerMsg::Finalized { session: s.session.clone(), group_vk_sec1_hex: vk.clone() };
                                 let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
                             }
                         }
+
+                        // Create and store the completed session object
+                        let completed_session = CompletedDKGSession {
+                            session: s.session.clone(),
+                            creator_suid: s.creator_suid,
+                            group_id: s.group_id.clone(),
+                            min_signers: s.min_signers,
+                            max_signers: s.max_signers,
+                            participants: s.participants.clone(),
+                            participants_pubs: s.suid_to_principal.iter().map(|(suid, p)| (*suid, p.clone())).collect(),
+                            joined: s.joined.iter().copied().collect(),
+                            created_at: s.created_at.to_rfc3339(),
+                            group_vk_sec1_hex: vk,
+                        };
+                        inner.completed_dkg_sessions.insert(s.session.clone(), completed_session);
+                        println!("[server] DKG session {} finalized and moved to completed.", s.session);
                     }
                 }
             }
         }
 
         // ---- Interactive signing handlers ----
-        ClientMsg::AnnounceSignSession { group_id, threshold, participants, participants_pubs, group_vk_sec1_hex, message_hex } => {
+        ClientMsg::AnnounceSignSession { group_id, threshold, participants, participants_pubs, group_vk_sec1_hex, message, message_hex } => {
+            let principal = principal.ok_or_else(|| anyhow!("must be logged in to announce"))?;
             let mut inner = state.inner.lock().await;
             if participants.is_empty() { return Err(anyhow!("participants cannot be empty")); }
             if threshold as usize > participants.len() { return Err(anyhow!("threshold cannot exceed participants")); }
@@ -1170,16 +1296,20 @@ async fn handle_client_text(
                 let bytes = hex::decode(pk_hex).context("roster pubkey hex")?;
                 let vk = EcdsaVerifyingKey::from_sec1_bytes(&bytes)
                     .map_err(|_| anyhow!("bad ECDSA pub for suid {}", suid))?;
-                let principal = hex::encode(vk.to_encoded_point(true).as_bytes());
-                if principal_to_suid.insert(principal.clone(), *suid).is_some() {
+                let p_principal = hex::encode(vk.to_encoded_point(true).as_bytes());
+                if principal_to_suid.insert(p_principal.clone(), *suid).is_some() {
                     return Err(anyhow!("principal appears more than once in the signing session roster"));
                 }
-                suid_to_principal.insert(*suid, principal);
+                suid_to_principal.insert(*suid, p_principal);
                 session_ecdsa_pubs.insert(*suid, vk);
             }
             if !participants.iter().all(|u| session_ecdsa_pubs.contains_key(u)) {
                 return Err(anyhow!("participants_pubs must include all suids"));
             }
+
+            // Ensure the announcer is in the participant list
+            let creator_suid = *principal_to_suid.get(&principal).ok_or_else(|| anyhow!("announcer must be a participant"))?;
+
             // Assign identifiers 1..=n for the session; actual KeyPackage ids must match in Join
             let mut idmap = HashMap::new();
             for (i, suid) in participants.iter().enumerate() {
@@ -1196,6 +1326,14 @@ async fn handle_client_text(
             let mut msg32 = [0u8; 32];
             msg32.copy_from_slice(&msg_bytes);
 
+            // Verify that the provided message hashes to the provided hex value
+            let mut hasher = Keccak256::new();
+            hasher.update(message.as_bytes());
+            let calculated_hash: [u8; 32] = hasher.finalize().into();
+            if calculated_hash != msg32 {
+                return Err(anyhow!("message and message_hex mismatch"));
+            }
+
             // Build roster snapshot for clients
             let mut roster_vec = Vec::new();
             for suid in &participants {
@@ -1207,11 +1345,13 @@ async fn handle_client_text(
             let session = Uuid::new_v4().to_string();
             inner.sign_sessions.insert(session.clone(), SignSession {
                 session: session.clone(),
+                creator_suid,
                 group_id: group_id.clone(),
                 threshold,
                 created_at: Utc::now(),
                 participants: participants.clone(),
                 participants_pubs: participants_pubs.clone(),
+                message,
                 suid_to_principal,
                 principal_to_suid,
                 idmap,
@@ -1229,7 +1369,7 @@ async fn handle_client_text(
             start_session_timeout(state.clone(), session.clone(), true);
         }
         ClientMsg::JoinSignSession { session, signer_id_bincode_hex, verifying_share_bincode_hex } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
 
             // Prepare broadcast data outside the mutable borrow scope
@@ -1291,7 +1431,7 @@ async fn handle_client_text(
             }
         }
         ClientMsg::SignRound1Submit { session, id_hex, commitments_bincode_hex, sig_ecdsa_hex } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
 
             // Collect broadcast data after mutation
@@ -1342,58 +1482,57 @@ async fn handle_client_text(
             }
         }
         ClientMsg::SignRound2Submit { session, id_hex, signature_share_bincode_hex, sig_ecdsa_hex } => {
-            let principal = principal_hex.as_ref().ok_or_else(|| anyhow!("must login first"))?.clone();
+            let principal = principal.ok_or_else(|| anyhow!("must login first"))?;
             let mut inner = state.inner.lock().await;
 
-            // Split borrow scopes, prepare aggregation and broadcast payloads
-            let (group_id, threshold, msg32_hex, group_vk_sec1_hex) = {
+            let mut should_aggregate = false;
+            let threshold;
+
+            // Scope for validation and checking if aggregation is ready
+            {
                 let s = inner
                     .sign_sessions
-                    .get(&session)
+                    .get_mut(&session)
                     .ok_or_else(|| anyhow!("unknown signing session"))?;
-                (
-                    s.group_id.clone(),
-                    s.threshold,
-                    format!("0x{}", hex::encode(s.msg32)),
-                    s.group_vk_sec1_hex.clone(),
-                )
-            };
 
-            // Will collect broadcast payloads here
-            let mut recipients: Vec<String> = Vec::new();
-            let mut session_name = String::new();
-            let mut final_fields: Option<(String, String, String, String, String, String)> = None; // (sig_hex, px, py, rx, ry, s)
+                threshold = s.threshold;
 
-            {
-                let s = inner.sign_sessions.get_mut(&session).unwrap();
                 let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
                 let suid = *s.principal_to_suid.get(&principal).ok_or_else(|| anyhow!("principal not in session"))?;
                 let expected_id = s.idmap.get(&suid).ok_or_else(|| anyhow!("no id for suid"))?;
                 if *expected_id != id {
                     return Err(anyhow!("identifier/suid mismatch"));
                 }
-                let vk = s
-                    .ecdsa_pubs
-                    .get(&suid)
-                    .ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
-                let payload = auth_payload_sign_r2(&session, &group_id, &id_hex, &signature_share_bincode_hex, &msg32_hex);
+
+                let vk = s.ecdsa_pubs.get(&suid).ok_or_else(|| anyhow!("no ECDSA vk for suid"))?;
+                let msg32_hex = format!("0x{}", hex::encode(s.msg32));
+                let payload = auth_payload_sign_r2(&session, &s.group_id, &id_hex, &signature_share_bincode_hex, &msg32_hex);
                 let sig = parse_sig_hex(&sig_ecdsa_hex)?;
                 vk.verify_digest(Keccak256::new().chain_update(&payload), &sig)
                     .map_err(|_| anyhow!("ECDSA verify failed (sign r2)"))?;
+
                 let sshare: frost::round2::SignatureShare =
                     bincode::deserialize(&hex::decode(&signature_share_bincode_hex)?)?;
                 s.sign_shares.insert(id, sshare);
 
                 if s.sign_shares.len() >= threshold as usize {
+                    should_aggregate = true;
+                }
+            } // Mutable borrow of `s` (and `inner`) ends here
+
+            if should_aggregate {
+                // Now that the mutable borrow is released, we can remove the session
+                if let Some(s) = inner.sign_sessions.remove(&session) {
                     // Aggregate and prepare broadcast payload
-                    let group_vk_bytes = hex::decode(&group_vk_sec1_hex)?;
+                    let group_vk_bytes = hex::decode(&s.group_vk_sec1_hex)?;
                     let group_vk = frost::VerifyingKey::deserialize(&group_vk_bytes)
                         .map_err(|e| anyhow!("group verifying key deserialize failed: {e}"))?;
                     let pubkey_package = frost::keys::PublicKeyPackage::new(s.vmap.clone(), group_vk);
                     let sp = frost::SigningPackage::new(s.commitments.clone(), &s.msg32);
                     let sig_final = frost::aggregate(&sp, &s.sign_shares, &pubkey_package)?;
                     let sig_hex = hex::encode(bincode::serialize(&sig_final)?);
-                    // Extract px,py,rx,ry,s similar to offchain-verify
+
+                    // Extract fields for the broadcast message
                     let vk_parsed = k256::PublicKey::from_sec1_bytes(&group_vk_bytes)?;
                     let vk_unc = vk_parsed.to_encoded_point(false);
                     let px = format!("0x{}", hex::encode(vk_unc.x().unwrap()));
@@ -1406,27 +1545,41 @@ async fn handle_client_text(
                         let z_bytes = frost::Secp256K1ScalarField::serialize(sig_final.z());
                         format!("0x{}", hex::encode(z_bytes))
                     };
-                    recipients = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
-                    session_name = s.session.clone();
-                    final_fields = Some((sig_hex, px, py, rx, ry, s_field));
-                }
-            }
 
-            if let Some((sig_hex, px, py, rx, ry, s_field)) = final_fields {
-                for p in recipients {
-                    if let Some(tx_i) = inner.conns.get(&p) {
-                        let msg = ServerMsg::SignatureReady {
-                            session: session_name.clone(),
-                            signature_bincode_hex: sig_hex.clone(),
-                            px: px.clone(),
-                            py: py.clone(),
-                            rx: rx.clone(),
-                            ry: ry.clone(),
-                            s: s_field.clone(),
-                            message: format!("0x{}", hex::encode(hex::decode(msg32_hex.trim_start_matches("0x")).unwrap())),
-                        };
-                        let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
+                    // Broadcast the final signature
+                    let recipients: Vec<String> = s.participants.iter().filter_map(|u| s.suid_to_principal.get(u).cloned()).collect();
+                    for p in &recipients {
+                        if let Some(tx_i) = inner.conns.get(p) {
+                            let msg = ServerMsg::SignatureReady {
+                                session: s.session.clone(),
+                                signature_bincode_hex: sig_hex.clone(),
+                                px: px.clone(),
+                                py: py.clone(),
+                                rx: rx.clone(),
+                                ry: ry.clone(),
+                                s: s_field.clone(),
+                                message: format!("0x{}", hex::encode(s.msg32)),
+                            };
+                            let _ = tx_i.send(Message::Text(serde_json::to_string(&msg)?));
+                        }
                     }
+
+                    // Create and store the completed session object
+                    let completed_session = CompletedSigningSession {
+                        session: s.session.clone(),
+                        creator_suid: s.creator_suid,
+                        group_id: s.group_id.clone(),
+                        threshold: s.threshold,
+                        participants: s.participants.clone(),
+                        joined: s.joined.iter().copied().collect(),
+                        message: s.message.clone(),
+                        message_hex: format!("0x{}", hex::encode(s.msg32)),
+                        participants_pubs: s.participants_pubs.clone(),
+                        created_at: s.created_at.to_rfc3339(),
+                        signature: sig_hex,
+                    };
+                    inner.completed_sign_sessions.insert(s.session.clone(), completed_session);
+                    println!("[server] Signing session {} finalized and moved to completed.", s.session);
                 }
             }
         }
