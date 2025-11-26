@@ -1,7 +1,7 @@
 import React from 'react';
 import {
     generate_ecdsa_keypair,
-    derive_key_from_signature,
+    derive_keys_from_signature,
     sign_challenge,
     dkg_part1,
     dkg_part2,
@@ -30,7 +30,7 @@ export const generateRandomKeys = () => {
 export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>) => {
     const messageToSign = "Tokamak-Frost-Seed V1";
     const signature = await signMessageAsync({ message: messageToSign });
-    return JSON.parse(derive_key_from_signature(signature));
+    return JSON.parse(derive_keys_from_signature(signature));
 };
 
 // ====================================================================

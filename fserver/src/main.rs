@@ -446,11 +446,11 @@ impl Default for Inner {
     }
 }
 
-// ============== Session timeout helper (3 minutes) ==============
+// ============== Session timeout helper (15 minutes) ==============
 fn start_session_timeout(state: AppState, session: String, is_sign: bool) {
-    // Spawn a background task that expires the session after 180 seconds
+    // Spawn a background task that expires the session after 900 seconds
     tokio::spawn(async move {
-        sleep(Duration::from_secs(180)).await;
+        sleep(Duration::from_secs(900)).await;
 
         // Collect the client senders for participants and remove the session
         let (senders, kind) = {
@@ -490,7 +490,7 @@ fn start_session_timeout(state: AppState, session: String, is_sign: bool) {
         for tx in senders {
             let _ = tx.send(Message::Text(
                 serde_json::to_string(&ServerMsg::Error {
-                    message: format!("{} session {} expired after 3 minutes", kind, session),
+                    message: format!("{} session {} expired after 15 minutes", kind, session),
                 })
                     .unwrap(),
             ));
@@ -741,7 +741,7 @@ async fn handle_client_text(
             };
             inner.sessions.insert(session.clone(), session_obj);
             println!("[server] Announced DKG session '{}'", session);
-            // Start a 3-minute timeout for this DKG session
+            // Start a 15-minute timeout for this DKG session
             start_session_timeout(state.clone(), session.clone(), false);
 
             // Reply to creator with the session id
@@ -1365,7 +1365,7 @@ async fn handle_client_text(
                 roster_snapshot: roster_vec,
             });
             let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::SignSessionCreated { session: session.clone() })?));
-            // Start a 3-minute timeout for this signing session
+            // Start a 15-minute timeout for this signing session
             start_session_timeout(state.clone(), session.clone(), true);
         }
         ClientMsg::JoinSignSession { session, signer_id_bincode_hex, verifying_share_bincode_hex } => {

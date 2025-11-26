@@ -6,6 +6,7 @@ use k256::ecdsa::{
     VerifyingKey as EcdsaVerifyingKey,
 };
 use k256::SecretKey as K256SecretKey;
+use sha2::Sha512;
 use sha3::{Digest, Keccak256};
 use signature::{DigestSigner, DigestVerifier};
 use frost_secp256k1 as frost;
@@ -25,6 +26,12 @@ struct KeyPackageWithMetadata {
     threshold: u16,
     group_id: String,
     roster: BTreeMap<u32, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncryptedShare {
+    ciphertext_hex: String,
+    nonce_hex: String,
 }
 
 // ====================================================================
@@ -64,19 +71,33 @@ pub fn generate_ecdsa_keypair() -> String {
 }
 
 #[wasm_bindgen]
-pub fn derive_key_from_signature(signature_hex: &str) -> Result<String, JsError> {
+pub fn derive_keys_from_signature(signature_hex: &str) -> Result<String, JsError> {
     let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x")).map_err(|e| JsError::new(&e.to_string()))?;
 
-    let mut hasher = Keccak256::new();
-    hasher.update(&sig_bytes);
-    let private_key_bytes = hasher.finalize();
+    // Hash the signature with SHA-512
+    let mut sha512_hasher = Sha512::new();
+    sha512_hasher.update(&sig_bytes);
+    let sha512_result = sha512_hasher.finalize();
 
+    // Split the 64-byte hash into two 32-byte chunks
+    let (first_32, second_32) = sha512_result.split_at(32);
+
+    // Derive the roster private key
+    let mut keccak_hasher_sk = Keccak256::new();
+    keccak_hasher_sk.update(first_32);
+    let private_key_bytes = keccak_hasher_sk.finalize();
     let sk = K256SecretKey::from_slice(&private_key_bytes).map_err(|e| JsError::new(&e.to_string()))?;
     let pk = sk.public_key();
+
+    // Derive the AES key
+    let mut keccak_hasher_aes = Keccak256::new();
+    keccak_hasher_aes.update(second_32);
+    let aes_key_bytes = keccak_hasher_aes.finalize();
 
     let response = serde_json::json!({
         "private_key_hex": hex::encode(sk.to_bytes()),
         "public_key_hex": hex::encode(pk.to_sec1_bytes()),
+        "aes_key_hex": hex::encode(aes_key_bytes),
     });
     Ok(response.to_string())
 }
@@ -319,6 +340,42 @@ pub fn sign_part2_sign(key_package_hex: &str, nonces_hex: &str, signing_package_
     let signature_share = frost::round2::sign(&signing_package, &nonces, &key_package).map_err(|e| JsError::new(&e.to_string()))?;
 
     Ok(hex::encode(bincode::serialize(&signature_share).unwrap()))
+}
+
+// ====================================================================
+// region: Share Encryption/Decryption
+// ====================================================================
+
+#[wasm_bindgen]
+pub fn encrypt_share(aes_key_hex: &str, share_plaintext_hex: &str) -> Result<String, JsError> {
+    let key_bytes = hex::decode(aes_key_hex).map_err(|e| JsError::new(&format!("Invalid AES key hex: {}", e)))?;
+    let plaintext = hex::decode(share_plaintext_hex).map_err(|e| JsError::new(&format!("Invalid plaintext hex: {}", e)))?;
+
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| JsError::new(&format!("Failed to create cipher: {}", e)))?;
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).map_err(|e| JsError::new(&format!("Encryption failed: {}", e)))?;
+
+    let encrypted_share = EncryptedShare {
+        ciphertext_hex: hex::encode(ciphertext),
+        nonce_hex: hex::encode(nonce),
+    };
+
+    serde_json::to_string(&encrypted_share).map_err(|e| JsError::new(&format!("Failed to serialize encrypted share: {}", e)))
+}
+
+#[wasm_bindgen]
+pub fn decrypt_share(aes_key_hex: &str, encrypted_share_json: &str) -> Result<String, JsError> {
+    let key_bytes = hex::decode(aes_key_hex).map_err(|e| JsError::new(&format!("Invalid AES key hex: {}", e)))?;
+    let encrypted_share: EncryptedShare = serde_json::from_str(encrypted_share_json).map_err(|e| JsError::new(&format!("Failed to parse encrypted share JSON: {}", e)))?;
+
+    let ciphertext = hex::decode(encrypted_share.ciphertext_hex).map_err(|e| JsError::new(&format!("Invalid ciphertext hex: {}", e)))?;
+    let nonce_bytes = hex::decode(encrypted_share.nonce_hex).map_err(|e| JsError::new(&format!("Invalid nonce hex: {}", e)))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| JsError::new(&format!("Failed to create cipher: {}", e)))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|e| JsError::new(&format!("Decryption failed: {}", e)))?;
+
+    Ok(hex::encode(plaintext))
 }
 
 // ====================================================================

@@ -3,7 +3,7 @@ import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import toast, { Toaster } from 'react-hot-toast';
 import type { SigningStatus, LogEntry, PendingSigningSession, CompletedSigningSession } from '../types';
 import { handleSigningServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from '../lib';
-import init, { get_signing_prerequisites, get_key_package_metadata, keccak256 } from '../../../pkg/tokamak_frost_wasm.js';
+import init, { get_signing_prerequisites, get_key_package_metadata, keccak256, decrypt_share } from '../../../pkg/tokamak_frost_wasm.js';
 import '../App.css';
 import { useModal } from '../useModal';
 
@@ -163,6 +163,7 @@ function SigningPage() {
     const [port, setPort] = useState('9034');
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
+    const [aesKey, setAesKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [keyPackage, setKeyPackage] = useState('');
     const [mySuid, setMySuid] = useState<number | null>(null);
@@ -193,6 +194,7 @@ function SigningPage() {
     // --- Refs ---
     const ws = useRef<WebSocket | null>(null);
     const signingState = useRef<any>({});
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     // --- Effects ---
     useEffect(() => {
@@ -265,15 +267,52 @@ function SigningPage() {
                 const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync);
                 setPrivateKey(derivedKeys.private_key_hex);
                 setPublicKey(derivedKeys.public_key_hex);
-                toast.success('Roster keys derived from MetaMask signature.');
+                setAesKey(derivedKeys.aes_key_hex);
+                toast.success('Roster and AES keys derived from MetaMask signature.');
             } else {
                 const keys = generateRandomKeys();
                 setPrivateKey(keys.private_key_hex);
                 setPublicKey(keys.public_key_hex);
+                setAesKey('');
                 toast.success('New random ECDSA key pair generated.');
             }
         } catch (e: any) {
             toast.error(`Key operation failed: ${e.message}`);
+        }
+    };
+
+    const handleKeyFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const content = e.target?.result as string;
+                    const jsonData = JSON.parse(content);
+                    if (!jsonData.finalShare) {
+                        throw new Error("Missing 'finalShare' in key file.");
+                    }
+
+                    let share = jsonData.finalShare;
+                    // Check if the share is an encrypted object
+                    if (typeof share === 'object' && share.ciphertext_hex && share.nonce_hex) {
+                        if (!aesKey) {
+                            throw new Error("Cannot decrypt share: AES key not available. Please derive keys from MetaMask first.");
+                        }
+                        log('info', 'Encrypted share detected. Decrypting...');
+                        share = decrypt_share(aesKey, JSON.stringify(share));
+                        log('success', 'Share decrypted successfully.');
+                    }
+
+                    setKeyPackage(share);
+                    log('info', 'Successfully loaded and parsed frost-key.json.');
+                    toast.success('Key file uploaded successfully!');
+                } catch (err: any) {
+                    log('error', `Failed to parse or decrypt key file: ${err.message}`);
+                    toast.error(`Error reading key file: ${err.message}`);
+                }
+            };
+            reader.readAsText(file);
         }
     };
 
@@ -461,7 +500,9 @@ function SigningPage() {
                     <hr />
                     <div className="form-group">
                         <label>Your DKG Secret Key Package</label>
-                        <textarea value={keyPackage} onChange={e => setKeyPackage(e.target.value)} rows={4} placeholder="Paste your secret key package from the DKG ceremony..."></textarea>
+                        <textarea readOnly value={keyPackage} onChange={e => setKeyPackage(e.target.value)} rows={4} placeholder="Upload your secret key package from the DKG ceremony..."></textarea>
+                        <input type="file" ref={fileInputRef} onChange={handleKeyFileUpload} accept=".json" style={{ display: 'none' }} />
+                        <button onClick={() => fileInputRef.current?.click()} className="grey-button" disabled={!aesKey}>Upload Key File</button>
                     </div>
                     <hr />
                     <div className="form-group">

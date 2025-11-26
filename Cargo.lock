@@ -3806,6 +3806,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2",
  "sha3",
  "signature",
  "uuid",
