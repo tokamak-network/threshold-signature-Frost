@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "start-server" : "(cd ../ && cargo run -p fserver -- server --bind 127.0.0.1:9034)",
     "build-wasm": "(cd ../ && wasm-pack build --target web)",
     "build": "npm run build-wasm && tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",

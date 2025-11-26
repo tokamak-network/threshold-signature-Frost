@@ -3,7 +3,7 @@ import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import toast, { Toaster } from 'react-hot-toast';
 import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGSession } from '../types';
 import { handleServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from '../lib';
-import init from '../../../pkg/tokamak_frost_wasm.js';
+import init, { encrypt_share } from '../../../pkg/tokamak_frost_wasm.js';
 import '../App.css';
 import { useModal } from '../useModal';
 
@@ -181,6 +181,7 @@ function DkgPage() {
     const [port, setPort] = useState('9034');
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
+    const [aesKey, setAesKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [mySuid, setMySuid] = useState<number | null>(null);
 
@@ -276,12 +277,14 @@ function DkgPage() {
                 const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync);
                 setPrivateKey(derivedKeys.private_key_hex);
                 setPublicKey(derivedKeys.public_key_hex);
-                toast.success('Roster keys derived from MetaMask signature.');
+                setAesKey(derivedKeys.aes_key_hex);
+                toast.success('Roster and AES keys derived from MetaMask signature.');
             } else {
                 log('info', 'Generating new random keys...');
                 const keys = generateRandomKeys();
                 setPrivateKey(keys.private_key_hex);
                 setPublicKey(keys.public_key_hex);
+                setAesKey(''); // No AES key for random generation
                 toast.success('New random ECDSA key pair generated.');
             }
         } catch (e: any) {
@@ -447,6 +450,45 @@ function DkgPage() {
         setViewingSession(session);
         openModal('details');
     };
+
+    const handleDownloadKey = () => {
+        if (!finalShare || !finalGroupKey) {
+            toast.error('No final key to download.');
+            return;
+        }
+
+        const keyData = {
+            finalShare: JSON.parse(finalShare), // The share is already a JSON string of the encrypted object
+            finalGroupKey,
+        };
+
+        const blob = new Blob([JSON.stringify(keyData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'frost-key.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        log('info', 'Downloaded frost-key.json.');
+    };
+
+    useEffect(() => {
+        // Check if the share is finalized, an AES key is available, and the share is not already encrypted
+        const isPlaintextHex = (str: string) => /^[0-9a-fA-F]+$/.test(str);
+
+        if (dkgStatus === 'Finalized' && finalShare && aesKey && isPlaintextHex(finalShare)) {
+            try {
+                const encrypted = encrypt_share(aesKey, finalShare);
+                setFinalShare(encrypted);
+                log('success', 'Final share has been encrypted.');
+            } catch (e: any) {
+                log('error', `Failed to encrypt final share: ${e.message}`);
+                toast.error('Failed to encrypt the final share.');
+            }
+        }
+    }, [dkgStatus, finalShare, aesKey]);
 
     // --- Render ---
     return (
@@ -654,10 +696,11 @@ function DkgPage() {
 
                     {finalShare && (
                         <div className="results-display">
-                            <h3>Your Final Share (Secret)</h3>
+                            <h3>Your Final Share (Encrypted)</h3>
                             <textarea readOnly value={finalShare} rows={6}></textarea>
                             <h3>Final Group Public Key</h3>
                             <textarea readOnly value={finalGroupKey} rows={4}></textarea>
+                            <button onClick={handleDownloadKey} className="grey-button">Download Key File</button>
                         </div>
                     )}
                 </div>
