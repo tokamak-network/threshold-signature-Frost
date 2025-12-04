@@ -5,7 +5,7 @@ use k256::ecdsa::{
     SigningKey as EcdsaSigningKey,
     VerifyingKey as EcdsaVerifyingKey,
 };
-use k256::SecretKey as K256SecretKey;
+use k256::{EncodedPoint, SecretKey as K256SecretKey};
 use sha2::Sha512;
 use sha3::{Digest, Keccak256};
 use signature::{DigestSigner, DigestVerifier};
@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::{Aead, AeadCore};
+use bincode::Options;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use serde::{Serialize, Deserialize};
 
 // ====================================================================
@@ -291,6 +293,15 @@ pub fn dkg_part3(secret_package_hex: &str, round1_packages_hex: JsValue, round2_
 // ====================================================================
 // region: Interactive Signing Logic
 // ====================================================================
+#[wasm_bindgen]
+pub fn to_compressed_point(uncompressed_point_hex: &str) -> Result<String, JsError> {
+    let buffer = hex::decode(uncompressed_point_hex).map_err(|e| JsError::new(&e.to_string()))?;
+    let point = EncodedPoint::from_bytes(buffer.as_slice()).unwrap();
+    let response = serde_json::json!({
+        "point": hex::encode(point.compress().as_bytes()),
+     });
+    Ok(response.to_string())
+}
 
 #[wasm_bindgen]
 pub fn get_key_package_metadata(key_package_hex: &str) -> Result<String, JsError> {

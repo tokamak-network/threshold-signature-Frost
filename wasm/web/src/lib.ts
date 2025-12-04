@@ -312,6 +312,12 @@ interface SigningStateSetters {
     setFinalSignature: React.Dispatch<React.SetStateAction<string>>;
     setIsServerConnected: React.Dispatch<React.SetStateAction<boolean>>;
     setMySuid: React.Dispatch<React.SetStateAction<number | null>>;
+    setPx: React.Dispatch<React.SetStateAction<string>>;
+    setPy: React.Dispatch<React.SetStateAction<string>>;
+    setRx: React.Dispatch<React.SetStateAction<string>>;
+    setRy: React.Dispatch<React.SetStateAction<string>>;
+    setS: React.Dispatch<React.SetStateAction<string>>;
+    setFinalMessage: React.Dispatch<React.SetStateAction<string>>;
 }
 
 export const handleSigningServerMessage = async (
@@ -460,6 +466,12 @@ export const handleSigningServerMessage = async (
         case 'SignatureReady':
             log('success', `Signature Ready!`);
             setters.setFinalSignature(msg.payload.signature_bincode_hex);
+            setters.setPx(msg.payload.px);
+            setters.setPy(msg.payload.py);
+            setters.setRx(msg.payload.rx);
+            setters.setRy(msg.payload.ry);
+            setters.setS(msg.payload.s);
+            setters.setFinalMessage(msg.payload.message);
             setters.setSigningStatus('Complete');
             break;
     }

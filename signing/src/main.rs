@@ -18,19 +18,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use futures::{sink::SinkExt, stream::StreamExt};
 use frost_core::Field;
 use frost_secp256k1 as frost;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
+use futures::{sink::SinkExt, stream::StreamExt};
 use k256::ecdsa::{
     signature::{DigestSigner, DigestVerifier},
-    Signature as EcdsaSignature,
-    SigningKey as EcdsaSigningKey,
-    VerifyingKey as EcdsaVerifyingKey,
+    Signature as EcdsaSignature, SigningKey as EcdsaSigningKey, VerifyingKey as EcdsaVerifyingKey,
 };
-use k256::PublicKey;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::FieldBytes;
+use k256::PublicKey;
 use k256::Scalar;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -44,7 +42,11 @@ use tungstenite::Message as WsMsg;
 enum ClientMsg {
     // Auth
     RequestChallenge,
-    Login { challenge: String, pubkey_hex: String, signature_hex: String },
+    Login {
+        challenge: String,
+        pubkey_hex: String,
+        signature_hex: String,
+    },
 
     // Interactive signing session control
     AnnounceSignSession {
@@ -77,13 +79,26 @@ enum ClientMsg {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 enum ServerMsg {
-    Error { message: String },
-    Info { message: String },
-    Challenge { challenge: String },
-    LoginOk { user_id: u32, access_token: String },
+    Error {
+        message: String,
+    },
+    Info {
+        message: String,
+    },
+    Challenge {
+        challenge: String,
+    },
+    LoginOk {
+        principal: String,
+        #[serde(rename = "suid")]
+        user_id: u32,
+        access_token: String,
+    },
 
     // Interactive signing session events
-    SignSessionCreated { session: String },
+    SignSessionCreated {
+        session: String,
+    },
     SignReadyRound1 {
         session: String,
         group_id: String,
@@ -93,7 +108,10 @@ enum ServerMsg {
         // (uid, id_hex, ecdsa_pub_sec1_hex)
         roster: Vec<(u32, String, String)>,
     },
-    SignSigningPackage { session: String, signing_package_bincode_hex: String },
+    SignSigningPackage {
+        session: String,
+        signing_package_bincode_hex: String,
+    },
     SignatureReady {
         session: String,
         signature_bincode_hex: String,
@@ -108,10 +126,24 @@ enum ServerMsg {
 
 // Additional auth helpers for the interactive signing WS flow
 fn auth_payload_sign_r1(session: &str, group_id: &str, id_hex: &str, commits_hex: &str) -> Vec<u8> {
-    format!("SIGN_WS_R1|{}|{}|{}|{}", session, group_id, id_hex, commits_hex).into_bytes()
+    format!(
+        "SIGN_WS_R1|{}|{}|{}|{}",
+        session, group_id, id_hex, commits_hex
+    )
+        .into_bytes()
 }
-fn auth_payload_sign_r2(session: &str, group_id: &str, id_hex: &str, sigshare_hex: &str, msg32_hex: &str) -> Vec<u8> {
-    format!("SIGN_WS_R2|{}|{}|{}|{}|{}", session, group_id, id_hex, sigshare_hex, msg32_hex).into_bytes()
+fn auth_payload_sign_r2(
+    session: &str,
+    group_id: &str,
+    id_hex: &str,
+    sigshare_hex: &str,
+    msg32_hex: &str,
+) -> Vec<u8> {
+    format!(
+        "SIGN_WS_R2|{}|{}|{}|{}|{}",
+        session, group_id, id_hex, sigshare_hex, msg32_hex
+    )
+        .into_bytes()
 }
 
 /// Command-line interface for the signing tool.
@@ -329,7 +361,9 @@ fn read_ecdsa_signing_key_from_env() -> Result<Option<(EcdsaSigningKey, String)>
         let sk_hex = env::var("SIGNING_ECDSA_PRIV_HEX")
             .ok()
             .or_else(|| env::var("DKG_ECDSA_PRIV_HEX").ok());
-        let Some(sk_hex) = sk_hex else { return Ok(None); };
+        let Some(sk_hex) = sk_hex else {
+            return Ok(None);
+        };
         let bytes = hex::decode(sk_hex.trim())?;
         if bytes.len() != 32 {
             return Err(anyhow!("ECDSA priv must be 32 bytes (hex)"));
@@ -345,20 +379,48 @@ fn read_ecdsa_signing_key_from_env() -> Result<Option<(EcdsaSigningKey, String)>
 }
 
 /// Build the Round1 authentication payload from its fields (excluding auth fields).
-fn auth_payload_round1(group_id: &str, id_hex: &str, nonces_hex: &str, commits_hex: &str, session: Option<&str>) -> Vec<u8> {
+fn auth_payload_round1(
+    group_id: &str,
+    id_hex: &str,
+    nonces_hex: &str,
+    commits_hex: &str,
+    session: Option<&str>,
+) -> Vec<u8> {
     if let Some(sid) = session {
-        format!("signing:R1|{}|{}|{}|{}|{}", sid, group_id, id_hex, nonces_hex, commits_hex).into_bytes()
+        format!(
+            "signing:R1|{}|{}|{}|{}|{}",
+            sid, group_id, id_hex, nonces_hex, commits_hex
+        )
+            .into_bytes()
     } else {
-        format!("signing:R1|{}|{}|{}|{}", group_id, id_hex, nonces_hex, commits_hex).into_bytes()
+        format!(
+            "signing:R1|{}|{}|{}|{}",
+            group_id, id_hex, nonces_hex, commits_hex
+        )
+            .into_bytes()
     }
 }
 
 /// Build the Round2 authentication payload from its fields (excluding auth fields).
-fn auth_payload_round2(group_id: &str, id_hex: &str, sigshare_hex: &str, msg32_hex: &str, session: Option<&str>) -> Vec<u8> {
+fn auth_payload_round2(
+    group_id: &str,
+    id_hex: &str,
+    sigshare_hex: &str,
+    msg32_hex: &str,
+    session: Option<&str>,
+) -> Vec<u8> {
     if let Some(sid) = session {
-        format!("signing:R2|{}|{}|{}|{}|{}", sid, group_id, id_hex, sigshare_hex, msg32_hex).into_bytes()
+        format!(
+            "signing:R2|{}|{}|{}|{}|{}",
+            sid, group_id, id_hex, sigshare_hex, msg32_hex
+        )
+            .into_bytes()
     } else {
-        format!("signing:R2|{}|{}|{}|{}", group_id, id_hex, sigshare_hex, msg32_hex).into_bytes()
+        format!(
+            "signing:R2|{}|{}|{}|{}",
+            group_id, id_hex, sigshare_hex, msg32_hex
+        )
+            .into_bytes()
     }
 }
 
@@ -368,8 +430,8 @@ fn verify_ecdsa_keccak(payload: &[u8], pub_sec1_hex: &str, sig_hex: &str) -> Res
     let vk = EcdsaVerifyingKey::from_sec1_bytes(&pub_bytes)
         .map_err(|e| anyhow!("bad ECDSA pub: {e}"))?;
     let sig_bytes = hex::decode(sig_hex)?;
-    let sig = EcdsaSignature::from_slice(&sig_bytes)
-        .map_err(|_| anyhow!("bad ECDSA signature bytes"))?;
+    let sig =
+        EcdsaSignature::from_slice(&sig_bytes).map_err(|_| anyhow!("bad ECDSA signature bytes"))?;
     let hasher = Keccak256::new().chain_update(payload);
     vk.verify_digest(hasher, &sig)
         .map_err(|_| anyhow!("ECDSA signature verification failed"))
@@ -379,15 +441,20 @@ fn verify_ecdsa_keccak(payload: &[u8], pub_sec1_hex: &str, sig_hex: &str) -> Res
 /// bincode-hex signer id or a small decimal (1..n), which will be converted to bincode-hex.
 fn parse_participants_pubs_map(s: &str) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    if s.trim().is_empty() { return Ok(out); }
+    if s.trim().is_empty() {
+        return Ok(out);
+    }
     for pair in s.split(',') {
-        let (id_raw, pub_hex) = pair.split_once(':')
+        let (id_raw, pub_hex) = pair
+            .split_once(':')
             .ok_or_else(|| anyhow!("invalid participants-pubs entry (missing colon): {pair}"))?;
         let id_key = if id_raw.chars().all(|c| c.is_ascii_hexdigit()) && id_raw.len() > 2 {
             id_raw.to_string()
         } else {
             // try parse as integer index
-            let idx: u16 = id_raw.trim().parse()
+            let idx: u16 = id_raw
+                .trim()
+                .parse()
                 .map_err(|_| anyhow!("invalid id '{id_raw}', expected hex or integer"))?;
             let sc = Scalar::from(idx as u64);
             let ident = frost::Identifier::new(sc).expect("invalid identifier index: {idx}");
@@ -476,21 +543,25 @@ async fn main() -> Result<()> {
                 ecdsa_sig_keccak_hex: None,
             };
             if let Some((sk, pub_hex)) = read_ecdsa_signing_key_from_env()? {
-                let payload = auth_payload_round1(&r1.group_id, &r1.signer_id_bincode_hex, &nonces_hex, &commits_hex, r1.session.as_deref());
+                let payload = auth_payload_round1(
+                    &r1.group_id,
+                    &r1.signer_id_bincode_hex,
+                    &nonces_hex,
+                    &commits_hex,
+                    r1.session.as_deref(),
+                );
                 let sig: EcdsaSignature = sk.sign_digest(Keccak256::new().chain_update(&payload));
                 r1.ecdsa_pub_sec1_hex = Some(pub_hex);
                 r1.ecdsa_sig_keccak_hex = Some(hex::encode(sig.to_bytes()));
             }
             let base_dir = share.parent().unwrap_or_else(|| Path::new("out"));
-            let out_path = out
-                .clone()
-                .unwrap_or_else(|| {
-                    if let Some(sid) = sf.session.as_deref() {
-                        base_dir.join(format!("round1_{}_{}.json", sid, id_hex))
-                    } else {
-                        base_dir.join(format!("round1_{}.json", id_hex))
-                    }
-                });
+            let out_path = out.clone().unwrap_or_else(|| {
+                if let Some(sid) = sf.session.as_deref() {
+                    base_dir.join(format!("round1_{}_{}.json", sid, id_hex))
+                } else {
+                    base_dir.join(format!("round1_{}.json", id_hex))
+                }
+            });
             write_json(&out_path, &r1)?;
             println!("Wrote {}", out_path.display());
         }
@@ -541,16 +612,32 @@ async fn main() -> Result<()> {
             };
             for entry in fs::read_dir(&round1_dir)? {
                 let p = entry?.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-                let r1: Round1One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
-                if let (Some(pub_hex), Some(sig_hex)) = (&r1.ecdsa_pub_sec1_hex, &r1.ecdsa_sig_keccak_hex) {
+                if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let r1: Round1One = match read_json(&p) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let (Some(pub_hex), Some(sig_hex)) =
+                    (&r1.ecdsa_pub_sec1_hex, &r1.ecdsa_sig_keccak_hex)
+                {
                     // If an external map is provided, ensure the pub matches the expected for this id.
                     if let Some(expected_pub) = auth_map.get(&r1.signer_id_bincode_hex) {
                         if expected_pub.trim().to_lowercase() != pub_hex.trim().to_lowercase() {
-                            return Err(anyhow!("Round1 pub mismatch for id {}", r1.signer_id_bincode_hex));
+                            return Err(anyhow!(
+                                "Round1 pub mismatch for id {}",
+                                r1.signer_id_bincode_hex
+                            ));
                         }
                     }
-                    let payload = auth_payload_round1(&r1.group_id, &r1.signer_id_bincode_hex, &r1.nonces_bincode_hex, &r1.commitments_bincode_hex, r1.session.as_deref());
+                    let payload = auth_payload_round1(
+                        &r1.group_id,
+                        &r1.signer_id_bincode_hex,
+                        &r1.nonces_bincode_hex,
+                        &r1.commitments_bincode_hex,
+                        r1.session.as_deref(),
+                    );
                     verify_ecdsa_keccak(&payload, pub_hex, sig_hex)?;
                 }
             }
@@ -599,21 +686,25 @@ async fn main() -> Result<()> {
                 ecdsa_sig_keccak_hex: None,
             };
             if let Some((sk, pub_hex)) = read_ecdsa_signing_key_from_env()? {
-                let payload = auth_payload_round2(&r2.group_id, &r2.signer_id_bincode_hex, &sigshare_hex, &msg32_hex, r2.session.as_deref());
+                let payload = auth_payload_round2(
+                    &r2.group_id,
+                    &r2.signer_id_bincode_hex,
+                    &sigshare_hex,
+                    &msg32_hex,
+                    r2.session.as_deref(),
+                );
                 let sig: EcdsaSignature = sk.sign_digest(Keccak256::new().chain_update(&payload));
                 r2.ecdsa_pub_sec1_hex = Some(pub_hex);
                 r2.ecdsa_sig_keccak_hex = Some(hex::encode(sig.to_bytes()));
             }
             let base_dir = &round1_dir;
-            let out_path = out
-                .clone()
-                .unwrap_or_else(|| {
-                    if let Some(sid) = sf.session.as_deref() {
-                        base_dir.join(format!("round2_{}_{}.json", sid, my_id_hex))
-                    } else {
-                        base_dir.join(format!("round2_{}.json", my_id_hex))
-                    }
-                });
+            let out_path = out.clone().unwrap_or_else(|| {
+                if let Some(sid) = sf.session.as_deref() {
+                    base_dir.join(format!("round2_{}_{}.json", sid, my_id_hex))
+                } else {
+                    base_dir.join(format!("round2_{}.json", my_id_hex))
+                }
+            });
             write_json(&out_path, &r2)?;
             println!("Wrote {}", out_path.display());
         }
@@ -643,7 +734,13 @@ async fn main() -> Result<()> {
                     Err(_) => continue,
                 };
                 if let Some(s) = r1.session.clone() {
-                    if let Some(ts) = target_session.clone() { if ts != s { return Err(anyhow!("session mismatch among Round1 files")); } } else { target_session = Some(s); }
+                    if let Some(ts) = target_session.clone() {
+                        if ts != s {
+                            return Err(anyhow!("session mismatch among Round1 files"));
+                        }
+                    } else {
+                        target_session = Some(s);
+                    }
                 }
                 let id: frost::Identifier =
                     bincode::deserialize(&hex::decode(&r1.signer_id_bincode_hex)?)?;
@@ -659,15 +756,31 @@ async fn main() -> Result<()> {
             };
             for entry in fs::read_dir(&round1_dir)? {
                 let p = entry?.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-                let r1: Round1One = match read_json(&p) { Ok(v) => v, Err(_) => continue };
-                if let (Some(pub_hex), Some(sig_hex)) = (&r1.ecdsa_pub_sec1_hex, &r1.ecdsa_sig_keccak_hex) {
+                if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let r1: Round1One = match read_json(&p) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let (Some(pub_hex), Some(sig_hex)) =
+                    (&r1.ecdsa_pub_sec1_hex, &r1.ecdsa_sig_keccak_hex)
+                {
                     if let Some(expected_pub) = auth_map.get(&r1.signer_id_bincode_hex) {
                         if expected_pub.trim().to_lowercase() != pub_hex.trim().to_lowercase() {
-                            return Err(anyhow!("Round1 pub mismatch for id {}", r1.signer_id_bincode_hex));
+                            return Err(anyhow!(
+                                "Round1 pub mismatch for id {}",
+                                r1.signer_id_bincode_hex
+                            ));
                         }
                     }
-                    let payload = auth_payload_round1(&r1.group_id, &r1.signer_id_bincode_hex, &r1.nonces_bincode_hex, &r1.commitments_bincode_hex, r1.session.as_deref());
+                    let payload = auth_payload_round1(
+                        &r1.group_id,
+                        &r1.signer_id_bincode_hex,
+                        &r1.nonces_bincode_hex,
+                        &r1.commitments_bincode_hex,
+                        r1.session.as_deref(),
+                    );
                     verify_ecdsa_keccak(&payload, pub_hex, sig_hex)?;
                 }
             }
@@ -699,7 +812,13 @@ async fn main() -> Result<()> {
                     msg_hex = Some(r2.msg_keccak32_hex.clone());
                 }
                 if let Some(s) = r2.session.clone() {
-                    if let Some(ts) = target_session.clone() { if ts != s { return Err(anyhow!("session mismatch among Round2 files")); } } else { target_session = Some(s); }
+                    if let Some(ts) = target_session.clone() {
+                        if ts != s {
+                            return Err(anyhow!("session mismatch among Round2 files"));
+                        }
+                    } else {
+                        target_session = Some(s);
+                    }
                 }
                 let id: frost::Identifier =
                     bincode::deserialize(&hex::decode(&r2.signer_id_bincode_hex)?)?;
@@ -710,7 +829,9 @@ async fn main() -> Result<()> {
             // Check group.json session vs files if present
             if let Some(gs) = target_session_from_group.as_ref() {
                 if let Some(ts) = target_session.as_ref() {
-                    if gs != ts { return Err(anyhow!("group.json session does not match rounds session")); }
+                    if gs != ts {
+                        return Err(anyhow!("group.json session does not match rounds session"));
+                    }
                 } else {
                     // prefer group session if rounds omitted it
                     target_session = Some(gs.clone());
@@ -788,7 +909,20 @@ async fn main() -> Result<()> {
             println!("Wrote signature.json");
         }
 
-        Commands::Ws { url, create, group_id, threshold, participants, participants_pubs, group_vk_sec1_hex, message, share, session, session_file, out_dir } => {
+        Commands::Ws {
+            url,
+            create,
+            group_id,
+            threshold,
+            participants,
+            participants_pubs,
+            group_vk_sec1_hex,
+            message,
+            share,
+            session,
+            session_file,
+            out_dir,
+        } => {
             // Load this signer's share
             let sf: ShareFile = read_json(&share)?;
             let my_id_hex = sf.signer_id_bincode_hex.clone();
@@ -797,7 +931,13 @@ async fn main() -> Result<()> {
 
             // ECDSA signing key for WS auth and payload signatures
             let ecdsa_keys = read_ecdsa_signing_key_from_env()?;
-            let (ecdsa_sign, ecdsa_pub_hex) = if let Some((sk, pub_hex)) = ecdsa_keys { (sk, pub_hex) } else { return Err(anyhow!("Missing DKG_ECDSA_PRIV_HEX or SIGNING_ECDSA_PRIV_HEX in env")); };
+            let (ecdsa_sign, ecdsa_pub_hex) = if let Some((sk, pub_hex)) = ecdsa_keys {
+                (sk, pub_hex)
+            } else {
+                return Err(anyhow!(
+                    "Missing DKG_ECDSA_PRIV_HEX or SIGNING_ECDSA_PRIV_HEX in env"
+                ));
+            };
 
             // Connect WS
             let (ws_stream, _) = connect_async(&url).await.context("connect ws")?;
@@ -805,14 +945,32 @@ async fn main() -> Result<()> {
 
             // Helper macro
             macro_rules! send_json_ws {
-                ($m:expr) => {{ let s = serde_json::to_string(&$m)?; write.send(WsMsg::Text(s)).await?; }};
+                ($m:expr) => {{
+                    let s = serde_json::to_string(&$m)?;
+                    write.send(WsMsg::Text(s)).await?;
+                }};
             }
 
             // If creator, announce signing session
             if create {
-                let parts: Vec<u32> = participants.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse::<u32>().expect("uid u32")).collect();
-                let pubs: Vec<(u32, String)> = participants_pubs.split(',').filter(|s| !s.is_empty()).map(|kv| { let (u,p) = kv.split_once(':').expect("uid:pub"); (u.trim().parse::<u32>().expect("uid"), p.trim().to_string()) }).collect();
-                let msg_hex = if message.starts_with("0x") { message.clone() } else { format!("0x{}", hex::encode(message.as_bytes())) };
+                let parts: Vec<u32> = participants
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().parse::<u32>().expect("uid u32"))
+                    .collect();
+                let pubs: Vec<(u32, String)> = participants_pubs
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|kv| {
+                        let (u, p) = kv.split_once(':').expect("uid:pub");
+                        (u.trim().parse::<u32>().expect("uid"), p.trim().to_string())
+                    })
+                    .collect();
+                let msg_hex = if message.starts_with("0x") {
+                    message.clone()
+                } else {
+                    format!("0x{}", hex::encode(message.as_bytes()))
+                };
                 send_json_ws!(ClientMsg::AnnounceSignSession {
                     group_id: group_id.clone(),
                     threshold,
@@ -828,13 +986,20 @@ async fn main() -> Result<()> {
 
             // State
             let mut session_id: Option<String> = session.map(|s| s.trim().to_string());
-            let session_file_path = session_file.unwrap_or_else(|| out_dir.join("sign_session.txt"));
+            let session_file_path =
+                session_file.unwrap_or_else(|| out_dir.join("sign_session.txt"));
             if !create && session_id.is_none() {
-                if let Ok(s) = fs::read_to_string(&session_file_path) { let st = s.trim().to_string(); if !st.is_empty() { session_id = Some(st); } }
+                if let Ok(s) = fs::read_to_string(&session_file_path) {
+                    let st = s.trim().to_string();
+                    if !st.is_empty() {
+                        session_id = Some(st);
+                    }
+                }
             }
 
             // Round1 local variables
-            let secret_share: frost::keys::SecretShare = bincode::deserialize(&hex::decode(&sf.secret_share_bincode_hex)?)?;
+            let secret_share: frost::keys::SecretShare =
+                bincode::deserialize(&hex::decode(&sf.secret_share_bincode_hex)?)?;
             let key_package = frost::keys::KeyPackage::try_from(secret_share)?;
             let mut rng = OsRng;
             let (mut my_nonces_opt, mut my_commitments_opt) = (None, None);
@@ -851,62 +1016,143 @@ async fn main() -> Result<()> {
                             }
                             ServerMsg::Challenge { challenge } => {
                                 // Sign challenge
-                                let uuid = uuid::Uuid::parse_str(&challenge).context("challenge uuid")?;
-                                let sig: EcdsaSignature = ecdsa_sign.sign_digest(Keccak256::new().chain_update(uuid.as_bytes()));
+                                let uuid =
+                                    uuid::Uuid::parse_str(&challenge).context("challenge uuid")?;
+                                let sig: EcdsaSignature = ecdsa_sign
+                                    .sign_digest(Keccak256::new().chain_update(uuid.as_bytes()));
                                 let sig_hex = hex::encode(sig.to_der().as_bytes());
-                                send_json_ws!(ClientMsg::Login { challenge, pubkey_hex: ecdsa_pub_hex.clone(), signature_hex: sig_hex });
+                                send_json_ws!(ClientMsg::Login {
+                                    challenge,
+                                    pubkey_hex: ecdsa_pub_hex.clone(),
+                                    signature_hex: sig_hex
+                                });
                             }
                             ServerMsg::LoginOk { user_id, .. } => {
                                 // Join signing session with our verifying share
-                                let sid = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
+                                let sid = session_id
+                                    .clone()
+                                    .ok_or_else(|| anyhow!("no session id yet"))?;
                                 send_json_ws!(ClientMsg::JoinSignSession {
                                     session: sid,
                                     signer_id_bincode_hex: my_id_hex.clone(),
-                                    verifying_share_bincode_hex: sf.verifying_share_bincode_hex.clone(),
+                                    verifying_share_bincode_hex: sf
+                                        .verifying_share_bincode_hex
+                                        .clone(),
                                 });
                                 println!("[ws] logged in as uid {user_id}");
                             }
-                            ServerMsg::SignReadyRound1 { session, group_id: gid, threshold: _t, participants: _n, msg_keccak32_hex: _m, roster: _ } => {
+                            ServerMsg::SignReadyRound1 {
+                                session,
+                                group_id: gid,
+                                threshold: _t,
+                                participants: _n,
+                                msg_keccak32_hex: _m,
+                                roster: _,
+                            } => {
                                 // Ensure this is our session
-                                if Some(&session) != session_id.as_ref() { continue; }
+                                if Some(&session) != session_id.as_ref() {
+                                    continue;
+                                }
                                 // Generate round1 nonces/commitments then submit
-                                let (nonces, commitments) = frost::round1::commit(key_package.signing_share(), &mut rng);
+                                let (nonces, commitments) =
+                                    frost::round1::commit(key_package.signing_share(), &mut rng);
                                 let commits_hex = hex::encode(bincode::serialize(&commitments)?);
                                 my_nonces_opt = Some(nonces);
                                 my_commitments_opt = Some(commitments.clone());
                                 let sid = session_id.clone().unwrap();
-                                let _payload = auth_payload_round1(&gid, &my_id_hex, "", &commits_hex, None);
-                                let sig: EcdsaSignature = ecdsa_sign.sign_digest(Keccak256::new().chain_update(&auth_payload_sign_r1(&sid, &gid, &my_id_hex, &commits_hex)));
+                                let _payload =
+                                    auth_payload_round1(&gid, &my_id_hex, "", &commits_hex, None);
+                                let sig: EcdsaSignature =
+                                    ecdsa_sign.sign_digest(Keccak256::new().chain_update(
+                                        &auth_payload_sign_r1(&sid, &gid, &my_id_hex, &commits_hex),
+                                    ));
                                 let sig_hex = hex::encode(sig.to_der().as_bytes());
-                                send_json_ws!(ClientMsg::SignRound1Submit { session: sid, id_hex: my_id_hex.clone(), commitments_bincode_hex: commits_hex, sig_ecdsa_hex: sig_hex });
+                                send_json_ws!(ClientMsg::SignRound1Submit {
+                                    session: sid,
+                                    id_hex: my_id_hex.clone(),
+                                    commitments_bincode_hex: commits_hex,
+                                    sig_ecdsa_hex: sig_hex
+                                });
                             }
-                            ServerMsg::SignSigningPackage { session, signing_package_bincode_hex } => {
-                                if Some(&session) != session_id.as_ref() { continue; }
+                            ServerMsg::SignSigningPackage {
+                                session,
+                                signing_package_bincode_hex,
+                            } => {
+                                if Some(&session) != session_id.as_ref() {
+                                    continue;
+                                }
                                 // Round2 signing
-                                let sp: frost::SigningPackage = bincode::deserialize(&hex::decode(&signing_package_bincode_hex)?)?;
-                                let my_nonces = my_nonces_opt.take().ok_or_else(|| anyhow!("missing my nonces"))?;
+                                let sp: frost::SigningPackage = bincode::deserialize(
+                                    &hex::decode(&signing_package_bincode_hex)?,
+                                )?;
+                                let my_nonces = my_nonces_opt
+                                    .take()
+                                    .ok_or_else(|| anyhow!("missing my nonces"))?;
                                 let sig_share = frost::round2::sign(&sp, &my_nonces, &key_package)?;
                                 let sigshare_hex = hex::encode(bincode::serialize(&sig_share)?);
                                 let gid = group_id.clone();
                                 let msg32_hex = format!("0x{}", hex::encode(sp.message()));
                                 let sid = session_id.clone().unwrap();
-                                let sig: EcdsaSignature = ecdsa_sign.sign_digest(Keccak256::new().chain_update(&auth_payload_sign_r2(&sid, &gid, &my_id_hex, &sigshare_hex, &msg32_hex)));
+                                let sig: EcdsaSignature = ecdsa_sign.sign_digest(
+                                    Keccak256::new().chain_update(&auth_payload_sign_r2(
+                                        &sid,
+                                        &gid,
+                                        &my_id_hex,
+                                        &sigshare_hex,
+                                        &msg32_hex,
+                                    )),
+                                );
                                 let sig_hex = hex::encode(sig.to_der().as_bytes());
-                                send_json_ws!(ClientMsg::SignRound2Submit { session: sid, id_hex: my_id_hex.clone(), signature_share_bincode_hex: sigshare_hex, sig_ecdsa_hex: sig_hex });
+                                send_json_ws!(ClientMsg::SignRound2Submit {
+                                    session: sid,
+                                    id_hex: my_id_hex.clone(),
+                                    signature_share_bincode_hex: sigshare_hex,
+                                    sig_ecdsa_hex: sig_hex
+                                });
                             }
-                            ServerMsg::SignatureReady { session, signature_bincode_hex, px, py, rx, ry, s, message } => {
-                                if Some(&session) != session_id.as_ref() { continue; }
+                            ServerMsg::SignatureReady {
+                                session,
+                                signature_bincode_hex,
+                                px,
+                                py,
+                                rx,
+                                ry,
+                                s,
+                                message,
+                            } => {
+                                if Some(&session) != session_id.as_ref() {
+                                    continue;
+                                }
                                 // Verify offchain (like offchain-verify)
-                                let pxb = hex::decode(px.trim_start_matches("0x"))?; let pyb = hex::decode(py.trim_start_matches("0x"))?;
-                                let mut vk_un = [0u8;65]; vk_un[0]=0x04; vk_un[1..33].copy_from_slice(&pxb); vk_un[33..65].copy_from_slice(&pyb);
-                                let ep = k256::EncodedPoint::from_bytes(&vk_un)?; let affine = k256::AffinePoint::from_encoded_point(&ep).unwrap();
+                                let pxb = hex::decode(px.trim_start_matches("0x"))?;
+                                let pyb = hex::decode(py.trim_start_matches("0x"))?;
+                                let mut vk_un = [0u8; 65];
+                                vk_un[0] = 0x04;
+                                vk_un[1..33].copy_from_slice(&pxb);
+                                vk_un[33..65].copy_from_slice(&pyb);
+                                let ep = k256::EncodedPoint::from_bytes(&vk_un)?;
+                                let affine = k256::AffinePoint::from_encoded_point(&ep).unwrap();
                                 let compressed = affine.to_encoded_point(true);
                                 let vk = frost::VerifyingKey::deserialize(compressed.as_bytes())?;
-                                let sig = frost::Signature::deserialize(&hex::decode(signature_bincode_hex)?)?;
-                                let m = hex::decode(message.trim_start_matches("0x"))?; let mut m32=[0u8;32]; m32.copy_from_slice(&m);
+                                let sig = frost::Signature::deserialize(&hex::decode(
+                                    signature_bincode_hex,
+                                )?)?;
+                                let m = hex::decode(message.trim_start_matches("0x"))?;
+                                let mut m32 = [0u8; 32];
+                                m32.copy_from_slice(&m);
                                 let ok = vk.verify(&m32, &sig).is_ok();
                                 fs::create_dir_all(&out_dir)?;
-                                let out = SignatureOut { group_id: group_id.clone(), signature_bincode_hex: hex::encode(bincode::serialize(&sig)?), px, py, rx, ry, s, message, session: session_id.clone() };
+                                let out = SignatureOut {
+                                    group_id: group_id.clone(),
+                                    signature_bincode_hex: hex::encode(bincode::serialize(&sig)?),
+                                    px,
+                                    py,
+                                    rx,
+                                    ry,
+                                    s,
+                                    message,
+                                    session: session_id.clone(),
+                                };
                                 write_json(out_dir.join("signature.json"), &out)?;
                                 println!("[ws] Signature verify: {}", ok);
                                 break;

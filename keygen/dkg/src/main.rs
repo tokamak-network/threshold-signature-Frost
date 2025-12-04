@@ -22,22 +22,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::helper::parse_sig_hex;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use frost_core::keys::CoefficientCommitment;
 use frost_secp256k1 as frost;
 use futures::{sink::SinkExt, stream::StreamExt};
 use k256::ecdsa::{
-    Signature as EcdsaSignature,
-    SigningKey as EcdsaSigningKey,
-    VerifyingKey as EcdsaVerifyingKey,
+    Signature as EcdsaSignature, SigningKey as EcdsaSigningKey, VerifyingKey as EcdsaVerifyingKey,
 };
 use k256::SecretKey as K256SecretKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use signature::{DigestSigner, DigestVerifier};
-use crate::helper::parse_sig_hex;
 use uuid::Uuid;
 
 // -------- ECDSA auth helpers (source integrity & authentication) --------
@@ -84,12 +82,7 @@ fn auth_payload_finalize(session: &str, id: &frost::Identifier, group_vk_sec1: &
 // ========================= CLI =========================
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "dkg",
-    author,
-    version,
-    about = "DKG client (FROST secp256k1)"
-)]
+#[command(name = "dkg", author, version, about = "DKG client (FROST secp256k1)")]
 struct Cli {
     /// WebSocket URL, e.g. ws://127.0.0.1:9000/ws
     #[arg(long, default_value = "ws://127.0.0.1:9000/ws")]
@@ -132,7 +125,7 @@ struct Cli {
 #[serde(tag = "type", content = "payload")]
 enum ClientMsg {
     /// Creator announces parameters; server generates a unique session id.
-    AnnounceSession {
+    AnnounceDKGSession {
         min_signers: u16,
         max_signers: u16,
         group_id: String,
@@ -146,7 +139,9 @@ enum ClientMsg {
         signature_hex: String,
     },
     Logout,
-    JoinSession { session: String },
+    JoinDKGSession {
+        session: String,
+    },
 
     // DKG round messages
     Round1Submit {
@@ -172,13 +167,26 @@ enum ClientMsg {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 enum ServerMsg {
-    Error { message: String },
-    Info { message: String },
-    Challenge { challenge: String },
-    LoginOk { user_id: u32, access_token: String },
+    Error {
+        message: String,
+    },
+    Info {
+        message: String,
+    },
+    Challenge {
+        challenge: String,
+    },
+    LoginOk {
+        principal: String,
+        #[serde(rename = "suid")]
+        user_id: u32,
+        access_token: String,
+    },
 
     /// Sent to the creator after a successful AnnounceSession
-    SessionCreated { session: String },
+    DKGSessionCreated {
+        session: String,
+    },
 
     // Signals
     ReadyRound1 {
@@ -195,13 +203,18 @@ enum ServerMsg {
         // (id_hex, pkg_bincode_hex, sig_ecdsa_hex)
         packages: Vec<(String, String, String)>,
     },
-    ReadyRound2 { session: String },
+    ReadyRound2 {
+        session: String,
+    },
     Round2All {
         session: String,
         // encrypted tuples: (from_id_hex, eph_pub_sec1_hex, nonce_hex, ct_hex, sig_ecdsa_hex)
         packages: Vec<(String, String, String, String, String)>,
     },
-    Finalized { session: String, group_vk_sec1_hex: String },
+    Finalized {
+        session: String,
+        group_vk_sec1_hex: String,
+    },
 }
 
 /// Share file format expected by the signing tool
@@ -269,7 +282,6 @@ async fn main() -> Result<()> {
         .await
 }
 
-
 async fn run_client(
     url: String,
     create: bool,
@@ -302,10 +314,9 @@ async fn run_client(
     if ecdsa_sk_bytes.len() != 32 {
         return Err(anyhow!("ECDSA priv must be 32 bytes (hex)"));
     }
-    let sk = K256SecretKey::from_slice(&ecdsa_sk_bytes)
-        .context("ECDSA private key parse")?;
-    let ecdsa_sign = EcdsaSigningKey::from_bytes(&sk.to_bytes())
-        .context("ECDSA signing key from bytes")?;
+    let sk = K256SecretKey::from_slice(&ecdsa_sk_bytes).context("ECDSA private key parse")?;
+    let ecdsa_sign =
+        EcdsaSigningKey::from_bytes(&sk.to_bytes()).context("ECDSA signing key from bytes")?;
     let ecdsa_verify = ecdsa_sign.verifying_key();
     let pubkey_hex = hex::encode(ecdsa_verify.to_encoded_point(true).as_bytes());
 
@@ -330,7 +341,7 @@ async fn run_client(
         }};
     }
 
-    // If creator, announce the session first (unauthenticated).
+    let mut announce_msg: Option<ClientMsg> = None;
     if create {
         let parts: Vec<u32> = participants
             .split(',')
@@ -353,24 +364,23 @@ async fn run_client(
                 (uid, hexpk)
             })
             .collect();
-        send_json!(
-            write,
-            ClientMsg::AnnounceSession {
-                min_signers,
-                max_signers,
-                group_id: group_id.clone(),
-                participants: parts,
-                participants_pubs: pubs
-            }
-        );
-        println!("[client] Announced new session");
+        announce_msg = Some(ClientMsg::AnnounceDKGSession {
+            min_signers,
+            max_signers,
+            group_id: group_id.clone(),
+            participants: parts,
+            participants_pubs: pubs,
+        });
+        println!("[client] Prepared session announcement (waiting for login)");
     } else {
         // Followers need a session id: CLI arg overrides file.
         if let Some(sid) = session_cli.clone() {
             session_id = Some(sid);
         } else if let Ok(text) = fs::read_to_string(&session_file_path) {
             let sid = text.trim().to_string();
-            if !sid.is_empty() { session_id = Some(sid); }
+            if !sid.is_empty() {
+                session_id = Some(sid);
+            }
         }
     }
 
@@ -395,7 +405,7 @@ async fn run_client(
     ) -> Result<()> {
         if logged_in {
             if let Some(s) = session_id {
-                let msg = ClientMsg::JoinSession { session: s.clone() };
+                let msg = ClientMsg::JoinDKGSession { session: s.clone() };
                 let s = serde_json::to_string(&msg)?;
                 write.send(tungstenite::Message::Text(s)).await?;
             }
@@ -408,7 +418,7 @@ async fn run_client(
             tungstenite::protocol::Message::Text(txt) => {
                 let smsg: ServerMsg = serde_json::from_str(&txt)?;
                 match smsg {
-                    ServerMsg::SessionCreated { session } => {
+                    ServerMsg::DKGSessionCreated { session } => {
                         println!("[client] Session created: {}", session);
                         // persist for others
                         fs::create_dir_all(&out_dir_path)?;
@@ -418,10 +428,12 @@ async fn run_client(
                     }
                     ServerMsg::Challenge { challenge } => {
                         println!("Received challenge, signing...");
-                        let challenge_uuid = Uuid::parse_str(&challenge).context("challenge is not a valid UUID")?;
+                        let challenge_uuid =
+                            Uuid::parse_str(&challenge).context("challenge is not a valid UUID")?;
                         let challenge_bytes = challenge_uuid.as_bytes();
 
-                        let sig: EcdsaSignature = ecdsa_sign.sign_digest(Keccak256::new().chain_update(challenge_bytes));
+                        let sig: EcdsaSignature =
+                            ecdsa_sign.sign_digest(Keccak256::new().chain_update(challenge_bytes));
                         let sig_hex = hex::encode(sig.to_der().as_bytes());
 
                         send_json!(
@@ -436,6 +448,10 @@ async fn run_client(
                     ServerMsg::LoginOk { user_id, .. } => {
                         println!("Logged in as uid {user_id}");
                         logged_in = true;
+                        if let Some(msg) = announce_msg.take() {
+                            send_json!(write, msg);
+                            println!("[client] Announced new session");
+                        }
                         try_join(&mut write, &session_id, logged_in).await?;
                     }
                     ServerMsg::ReadyRound1 {
@@ -447,7 +463,9 @@ async fn run_client(
                         roster,
                     } => {
                         // Only process messages for our current session
-                        if Some(&s) != session_id.as_ref() { continue; }
+                        if Some(&s) != session_id.as_ref() {
+                            continue;
+                        }
                         let id: frost::Identifier = bincode::deserialize(&hex::decode(&id_hex)?)?;
                         my_id = Some(id);
                         group_label_client = Some(group_label.clone());
@@ -471,7 +489,9 @@ async fn run_client(
                             frost::keys::dkg::part1(id, max_signers, min_signers, &mut rng)?;
                         r1_secret = Some(r1s);
                         // sign round1 package
-                        let session = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
+                        let session = session_id
+                            .clone()
+                            .ok_or_else(|| anyhow!("no session id yet"))?;
                         let payload = auth_payload_round1(&session, &id, &r1p);
                         let sig: EcdsaSignature =
                             ecdsa_sign.sign_digest(Keccak256::new().chain_update(&payload));
@@ -485,8 +505,13 @@ async fn run_client(
                         send_json!(write, msg);
                         println!("[client] Sent Round1Submit");
                     }
-                    ServerMsg::Round1All { session: s, packages } => {
-                        if Some(&s) != session_id.as_ref() { continue; }
+                    ServerMsg::Round1All {
+                        session: s,
+                        packages,
+                    } => {
+                        if Some(&s) != session_id.as_ref() {
+                            continue;
+                        }
                         r1_pkgs.clear();
                         for (id_hex, pkg_hex, sig_hex) in &packages {
                             let id: frost::Identifier =
@@ -495,7 +520,9 @@ async fn run_client(
                                 bincode::deserialize(&hex::decode(&pkg_hex)?)?;
                             // verify signature against roster
                             if let Some(vk) = roster_idhex_to_vk.get(id_hex) {
-                                let session = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
+                                let session = session_id
+                                    .clone()
+                                    .ok_or_else(|| anyhow!("no session id yet"))?;
                                 let payload = auth_payload_round1(&session, &id, &pkg);
                                 let sig = parse_sig_hex(sig_hex)?;
                                 vk.verify_digest(Keccak256::new().chain_update(&payload), &sig)
@@ -508,7 +535,9 @@ async fn run_client(
                         println!("[client] Received Round1All: {} packages", r1_pkgs.len());
                     }
                     ServerMsg::ReadyRound2 { session: s } => {
-                        if Some(&s) != session_id.as_ref() { continue; }
+                        if Some(&s) != session_id.as_ref() {
+                            continue;
+                        }
                         let my_id = my_id.ok_or_else(|| anyhow!("no id yet"))?;
                         let r1s = r1_secret.take().ok_or_else(|| anyhow!("no r1 secret"))?;
                         // DKG part2 expects OTHER participants' round1 packages (exclude self)
@@ -523,7 +552,8 @@ async fn run_client(
                         let (r2s, r2_out) = frost::keys::dkg::part2(r1s, &r1_for_me)?;
                         r2_secret = Some(r2s);
                         // Encrypt each outgoing r2 pkg for its recipient and sign the encrypted envelope.
-                        let mut pairs_enc: Vec<(String, String, String, String, String)> = Vec::new();
+                        let mut pairs_enc: Vec<(String, String, String, String, String)> =
+                            Vec::new();
                         for (rid, p) in r2_out.into_iter() {
                             let rid_hex = hex::encode(bincode::serialize(&rid)?);
                             let vk = roster_idhex_to_vk
@@ -531,10 +561,14 @@ async fn run_client(
                                 .ok_or_else(|| anyhow!("no vk for rid in roster"))?;
                             let plaintext = bincode::serialize(&p)?;
                             // ECIES: helper returns (ephemeral_pub_sec1, nonce12, ciphertext)
-                            let (eph_pub, nonce, ct) = helper::ecies_encrypt_for(vk, &plaintext, &mut rng)
-                                .context("ecies encrypt")?;
-                            let session = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
-                            let payload = auth_payload_round2(&session, &my_id, &rid, &eph_pub, &nonce, &ct);
+                            let (eph_pub, nonce, ct) =
+                                helper::ecies_encrypt_for(vk, &plaintext, &mut rng)
+                                    .context("ecies encrypt")?;
+                            let session = session_id
+                                .clone()
+                                .ok_or_else(|| anyhow!("no session id yet"))?;
+                            let payload =
+                                auth_payload_round2(&session, &my_id, &rid, &eph_pub, &nonce, &ct);
                             let sig: EcdsaSignature =
                                 ecdsa_sign.sign_digest(Keccak256::new().chain_update(&payload));
                             pairs_enc.push((
@@ -546,7 +580,9 @@ async fn run_client(
                             ));
                         }
                         let pairs_len = pairs_enc.len();
-                        let session = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
+                        let session = session_id
+                            .clone()
+                            .ok_or_else(|| anyhow!("no session id yet"))?;
                         let msg = ClientMsg::Round2Submit {
                             session,
                             id_hex: hex::encode(bincode::serialize(&my_id)?),
@@ -555,26 +591,37 @@ async fn run_client(
                         send_json!(write, msg);
                         println!("[client] Sent Round2Submit with {} packages", pairs_len);
                     }
-                    ServerMsg::Round2All { session: s, packages } => {
-                        if Some(&s) != session_id.as_ref() { continue; }
+                    ServerMsg::Round2All {
+                        session: s,
+                        packages,
+                    } => {
+                        if Some(&s) != session_id.as_ref() {
+                            continue;
+                        }
                         r2_pkgs_from_all.clear();
                         for (from_hex, eph_pub_hex, nonce_hex, ct_hex, sig_hex) in &packages {
-                            let fid: frost::Identifier = bincode::deserialize(&hex::decode(&from_hex)?)?;
+                            let fid: frost::Identifier =
+                                bincode::deserialize(&hex::decode(&from_hex)?)?;
                             let eph_pub = hex::decode(eph_pub_hex)?;
                             let nonce = hex::decode(nonce_hex)?;
                             let ct = hex::decode(ct_hex)?;
                             if let Some(vk) = roster_idhex_to_vk.get(from_hex) {
                                 let my_id_now = my_id.ok_or_else(|| anyhow!("no id"))?;
                                 // verify signature over the encrypted envelope
-                                let session = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
-                                let payload = auth_payload_round2(&session, &fid, &my_id_now, &eph_pub, &nonce, &ct);
+                                let session = session_id
+                                    .clone()
+                                    .ok_or_else(|| anyhow!("no session id yet"))?;
+                                let payload = auth_payload_round2(
+                                    &session, &fid, &my_id_now, &eph_pub, &nonce, &ct,
+                                );
                                 let sig = parse_sig_hex(sig_hex)?;
                                 vk.verify_digest(Keccak256::new().chain_update(&payload), &sig)
                                     .map_err(|_| anyhow!("peer ECDSA verify failed (round2)"))?;
                                 // decrypt using our long-term private key (same secp256k1 key as for ECDSA)
                                 let pt = helper::ecies_decrypt_with(&sk, &eph_pub, &nonce, &ct)
                                     .context("ecies decrypt")?;
-                                let pkg: frost::keys::dkg::round2::Package = bincode::deserialize(&pt)?;
+                                let pkg: frost::keys::dkg::round2::Package =
+                                    bincode::deserialize(&pt)?;
                                 r2_pkgs_from_all.insert(fid, pkg);
                             } else {
                                 return Err(anyhow!("no vk for from id in roster"));
@@ -607,14 +654,21 @@ async fn run_client(
                             frost::keys::dkg::part3(&r2s, &r1_for_me, &r2_pkgs_from_all)?;
                         final_kp = Some(kp.clone());
                         // keep kp locally (private); report group VK to coordinator
-                        let group_vk_sec1 = pkp.verifying_key().serialize()?;
+                        let mut group_vk_sec1 = pkp.verifying_key().serialize()?;
+                        if group_vk_sec1.len() == 65 {
+                            let vk = EcdsaVerifyingKey::from_sec1_bytes(&group_vk_sec1)
+                                .map_err(|_| anyhow!("invalid group vk"))?;
+                            group_vk_sec1 = vk.to_encoded_point(true).as_bytes().to_vec();
+                        }
                         let vk_len = group_vk_sec1.len();
                         // sign finalize
                         let id_hex_mine = hex::encode(bincode::serialize(&my_id)?);
-                        let session = session_id.clone().ok_or_else(|| anyhow!("no session id yet"))?;
+                        let session = session_id
+                            .clone()
+                            .ok_or_else(|| anyhow!("no session id yet"))?;
                         let payload_fin = auth_payload_finalize(&session, &my_id, &group_vk_sec1);
-                        let sig_fin: EcdsaSignature = ecdsa_sign
-                            .sign_digest(Keccak256::new().chain_update(&payload_fin));
+                        let sig_fin: EcdsaSignature =
+                            ecdsa_sign.sign_digest(Keccak256::new().chain_update(&payload_fin));
                         let sig_fin_hex = hex::encode(sig_fin.to_der().as_bytes());
                         send_json!(
                             write,
@@ -637,8 +691,13 @@ async fn run_client(
                             hex::encode(bincode::serialize(&kp)?)
                         );
                     }
-                    ServerMsg::Finalized { session: s, group_vk_sec1_hex } => {
-                        if Some(&s) != session_id.as_ref() { continue; }
+                    ServerMsg::Finalized {
+                        session: s,
+                        group_vk_sec1_hex,
+                    } => {
+                        if Some(&s) != session_id.as_ref() {
+                            continue;
+                        }
                         println!("DKG finalized. Group VK (SEC1): {group_vk_sec1_hex}");
                         // Build artifacts similar to trusted setup
                         fs::create_dir_all(&out_dir_path)?;
