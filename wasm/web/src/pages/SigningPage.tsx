@@ -187,6 +187,12 @@ function SigningPage() {
     const [viewingSession, setViewingSession] = useState<PendingSigningSession | CompletedSigningSession | null>(null);
     const [showCompleted, setShowCompleted] = useState(false);
     const [modalStack, setModalStack] = useState<string[]>([]);
+    const [px, setPx] = useState('');
+    const [py, setPy] = useState('');
+    const [rx, setRx] = useState('');
+    const [ry, setRy] = useState('');
+    const [s, setS] = useState('');
+    const [finalMessage, setFinalMessage] = useState('');
 
     // --- State for Logs ---
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -352,6 +358,12 @@ function SigningPage() {
                 setFinalSignature,
                 setIsServerConnected,
                 setMySuid,
+                setPx,
+                setPy,
+                setRx,
+                setRy,
+                setS,
+                setFinalMessage,
             }, log, ws);
         };
 
@@ -611,11 +623,37 @@ function SigningPage() {
                 {/* Status & Results Panel */}
                 <div className="panel">
                     <h2>3. Status & Signature</h2>
-                    {/* Status indicators will be added here */}
                     {finalSignature && (
                         <div className="results-display">
                             <h3>Final Aggregated Signature</h3>
-                            <textarea readOnly value={finalSignature} rows={6}></textarea>
+                            <div className="form-group">
+                                <label>Signature (Bincode Hex)</label>
+                                <textarea readOnly value={finalSignature} rows={4}></textarea>
+                            </div>
+                            <div className="form-group">
+                                <label>Group Public Key (Px)</label>
+                                <input type="text" readOnly value={px} />
+                            </div>
+                            <div className="form-group">
+                                <label>Group Public Key (Py)</label>
+                                <input type="text" readOnly value={py} />
+                            </div>
+                            <div className="form-group">
+                                <label>Signature Nonce (Rx)</label>
+                                <input type="text" readOnly value={rx} />
+                            </div>
+                            <div className="form-group">
+                                <label>Signature Nonce (Ry)</label>
+                                <input type="text" readOnly value={ry} />
+                            </div>
+                            <div className="form-group">
+                                <label>Signature Scalar (s)</label>
+                                <input type="text" readOnly value={s} />
+                            </div>
+                            <div className="form-group">
+                                <label>Signed Message Hash</label>
+                                <input type="text" readOnly value={finalMessage} />
+                            </div>
                         </div>
                     )}
                 </div>

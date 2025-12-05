@@ -15,6 +15,15 @@ fn create_js_map(entries: Vec<(&str, &str)>) -> JsValue {
     serde_wasm_bindgen::to_value(&map).expect("Failed to create JsValue map")
 }
 
+// Helper to create a dummy JsValue BTreeMap<u32, String>
+fn create_roster_js_map(entries: Vec<(u32, &str)>) -> JsValue {
+    let map: BTreeMap<u32, String> = entries
+        .into_iter()
+        .map(|(k, v)| (k, v.to_string()))
+        .collect();
+    serde_wasm_bindgen::to_value(&map).expect("Failed to create JsValue roster map")
+}
+
 #[wasm_bindgen_test]
 fn test_generate_and_derive_keys() {
     // Test random key generation
@@ -30,7 +39,7 @@ fn test_generate_and_derive_keys() {
 
     // Test deterministic key derivation
     let dummy_signature = hex::encode([1; 64]);
-    let derived_json = derive_key_from_signature(&dummy_signature).expect("derive_key_from_signature failed");
+    let derived_json = derive_keys_from_signature(&dummy_signature).expect("derive_keys_from_signature failed");
     let derived_keypair: serde_json::Value = serde_json::from_str(&derived_json).expect("Failed to parse derived keypair JSON");
     let derived_priv_hex = derived_keypair["private_key_hex"].as_str().expect("Missing derived private_key_hex");
     let derived_pub_hex = derived_keypair["public_key_hex"].as_str().expect("Missing derived public_key_hex");
@@ -41,7 +50,7 @@ fn test_generate_and_derive_keys() {
     assert_eq!(&VerifyingKey::from(&derived_sk.public_key()), &derived_pk, "Derived public key does not match derived private key");
 
     // Ensure it's deterministic
-    let derived_json_2 = derive_key_from_signature(&dummy_signature).expect("Second derive_key_from_signature failed");
+    let derived_json_2 = derive_keys_from_signature(&dummy_signature).expect("Second derive_keys_from_signature failed");
     assert_eq!(derived_json, derived_json_2, "Key derivation is not deterministic");
 }
 
@@ -117,6 +126,7 @@ fn test_dkg_and_signing_round_trip() {
     // ==================================
     let max_signers = 2;
     let min_signers = 2;
+    let group_id = "test_group";
 
     // --- Participant 1 Setup ---
     let p1_id_hex = get_identifier_hex(1).unwrap();
@@ -131,6 +141,9 @@ fn test_dkg_and_signing_round_trip() {
     let p2_part1: serde_json::Value = serde_json::from_str(&p2_part1_json).unwrap();
     let p2_secret1_hex = p2_part1["secret_package_hex"].as_str().unwrap();
     let p2_public1_hex = p2_part1["public_package_hex"].as_str().unwrap();
+
+    // --- Roster Setup ---
+    let roster = create_roster_js_map(vec![(1, "p1_address"), (2, "p2_address")]);
 
     // --- Round 2 ---
     // P1 creates packages for P2
@@ -152,7 +165,7 @@ fn test_dkg_and_signing_round_trip() {
     // --- Round 3 (Finalize for P1) ---
     let p1_r1_map_part3 = create_js_map(vec![(&p2_id_hex, p2_public1_hex)]);
     let p1_r2_map_part3 = create_js_map(vec![(&p2_id_hex, p2_to_p1_pkg_hex)]);
-    let p1_part3_json = dkg_part3(p1_secret2_hex, p1_r1_map_part3, p1_r2_map_part3).unwrap();
+    let p1_part3_json = dkg_part3(p1_secret2_hex, p1_r1_map_part3, p1_r2_map_part3, group_id, roster.clone()).unwrap();
     let p1_part3: serde_json::Value = serde_json::from_str(&p1_part3_json).unwrap();
     let p1_key_package_hex = p1_part3["key_package_hex"].as_str().unwrap();
     let group_public_key_hex = p1_part3["group_public_key_hex"].as_str().unwrap();
@@ -160,7 +173,7 @@ fn test_dkg_and_signing_round_trip() {
     // --- Round 3 (Finalize for P2) ---
     let p2_r1_map_part3 = create_js_map(vec![(&p1_id_hex, p1_public1_hex)]);
     let p2_r2_map_part3 = create_js_map(vec![(&p1_id_hex, p1_to_p2_pkg_hex)]);
-    let p2_part3_json = dkg_part3(p2_secret2_hex, p2_r1_map_part3, p2_r2_map_part3).unwrap();
+    let p2_part3_json = dkg_part3(p2_secret2_hex, p2_r1_map_part3, p2_r2_map_part3, group_id, roster.clone()).unwrap();
     let p2_part3: serde_json::Value = serde_json::from_str(&p2_part3_json).unwrap();
     let p2_key_package_hex = p2_part3["key_package_hex"].as_str().unwrap();
 
