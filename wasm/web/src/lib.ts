@@ -1,17 +1,22 @@
 import React from 'react';
 import {
     generate_ecdsa_keypair,
+    generate_eddsa_keypair,
     derive_keys_from_signature,
-    sign_challenge,
+    sign_challenge_ecdsa,
+    sign_challenge_eddsa,
     dkg_part1,
     dkg_part2,
     dkg_part3,
-    ecies_encrypt,
-    ecies_decrypt,
+    ecies_encrypt_ecdsa,
+    ecies_encrypt_eddsa,
+    ecies_decrypt_ecdsa,
+    ecies_decrypt_eddsa,
     get_auth_payload_round1,
     get_auth_payload_round2,
     get_auth_payload_finalize,
-    sign_message,
+    sign_message_ecdsa,
+    sign_message_eddsa,
     sign_part1_commit,
     sign_part2_sign,
     get_auth_payload_sign_r1,
@@ -23,15 +28,59 @@ import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGS
 // region: Key Management
 // ====================================================================
 
-export const generateRandomKeys = () => {
-    return JSON.parse(generate_ecdsa_keypair());
+export const generateRandomKeys = (keyType: 'secp256k1' | 'ed25519') => {
+    if (keyType === 'ed25519') {
+        const keys = JSON.parse(generate_eddsa_keypair());
+        keys.key_type = 'ed25519';
+        return keys;
+    }
+    const keys = JSON.parse(generate_ecdsa_keypair());
+    keys.key_type = 'secp256k1';
+    return keys;
 };
 
-export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>) => {
+export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>, targetKeyType: 'secp256k1' | 'ed25519') => {
     const messageToSign = "Tokamak-Frost-Seed V1";
     const signature = await signMessageAsync({ message: messageToSign });
-    return JSON.parse(derive_keys_from_signature(signature));
+    const keys = JSON.parse(derive_keys_from_signature(signature, targetKeyType));
+    keys.key_type = targetKeyType;
+    return keys;
 };
+
+// ====================================================================
+// region: Crypto Wrappers
+// ====================================================================
+
+export const signChallenge = (privateKeyHex: string, challenge: string, keyType: 'secp256k1' | 'ed25519') => {
+    if (keyType === 'ed25519') {
+        return sign_challenge_eddsa(privateKeyHex, challenge);
+    }
+    return sign_challenge_ecdsa(privateKeyHex, challenge);
+}
+
+export const signMessage = (privateKeyHex: string, messageHex: string, keyType: 'secp256k1' | 'ed25519') => {
+    if (keyType === 'ed25519') {
+        return sign_message_eddsa(privateKeyHex, messageHex);
+    }
+    return sign_message_ecdsa(privateKeyHex, messageHex);
+}
+
+export const eciesEncrypt = (recipientKeyHex: string, plaintextHex: string) => {
+    // Detect recipient key type by length
+    // Secp256k1 compressed: 33 bytes => 66 hex chars
+    // EdDSA compressed: 32 bytes => 64 hex chars
+    if (recipientKeyHex.length === 64) {
+        return ecies_encrypt_eddsa(recipientKeyHex, plaintextHex);
+    }
+    return ecies_encrypt_ecdsa(recipientKeyHex, plaintextHex);
+}
+
+export const eciesDecrypt = (privateKeyHex: string, ephPubHex: string, nonceHex: string, ctHex: string, keyType: 'secp256k1' | 'ed25519') => {
+    if (keyType === 'ed25519') {
+        return ecies_decrypt_eddsa(privateKeyHex, ephPubHex, nonceHex, ctHex);
+    }
+    return ecies_decrypt_ecdsa(privateKeyHex, ephPubHex, nonceHex, ctHex);
+}
 
 // ====================================================================
 // region: WebSocket Communication
@@ -65,11 +114,12 @@ interface DkgStateSetters {
     setJoiningSessionId: React.Dispatch<React.SetStateAction<string | null>>;
     setShowFinalKeyModal: React.Dispatch<React.SetStateAction<boolean>>;
     setMySuid: React.Dispatch<React.SetStateAction<number | null>>;
+    setRawKeyPackageHex: React.Dispatch<React.SetStateAction<string>>;
 }
 
 export const handleServerMessage = async (
     msg: any,
-    state: { privateKey: string, publicKey: string, isCreator: boolean, dkgState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
+    state: { privateKey: string, publicKey: string, keyType: 'secp256k1' | 'ed25519', isCreator: boolean, dkgState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
     setters: DkgStateSetters,
     log: (level: LogEntry['level'], message: string) => void,
     ws: React.MutableRefObject<WebSocket | null>
@@ -99,14 +149,15 @@ export const handleServerMessage = async (
 
         case 'Info':
             log('info', `Server Info: ${msg.payload.message}`);
+            // ... (keep regex logic same)
             const joinMatch = msg.payload.message.match(/participant (\d+) joined session (\S+)/);
             if (joinMatch) {
                 const joinedSuid = parseInt(joinMatch[1]);
                 const sessionId = joinMatch[2];
-                setters.setPendingSessions((prev: PendingDKGSession[]) => 
-                    prev.map(s => 
-                        s.session === sessionId 
-                            ? { ...s, joined: [...s.joined, joinedSuid] } 
+                setters.setPendingSessions((prev: PendingDKGSession[]) =>
+                    prev.map(s =>
+                        s.session === sessionId
+                            ? { ...s, joined: [...s.joined, joinedSuid] }
                             : s
                     )
                 );
@@ -122,13 +173,19 @@ export const handleServerMessage = async (
 
         case 'Challenge':
             try {
-                const signature = sign_challenge(state.privateKey, msg.payload.challenge);
+                const signature = signChallenge(state.privateKey, msg.payload.challenge, state.keyType);
                 log('info', 'Challenge signed. Sending login...');
+
+                // Construct RosterPublicKey object
+                const rosterKey = state.keyType === 'ed25519'
+                    ? { type: 'Ed25519', key: state.publicKey }
+                    : { type: 'Secp256k1', key: state.publicKey };
+
                 sendMessage(ws.current, {
                     type: 'Login',
                     payload: {
                         challenge: msg.payload.challenge,
-                        pubkey_hex: state.publicKey,
+                        public_key: rosterKey,
                         signature_hex: signature,
                     }
                 }, log);
@@ -151,10 +208,15 @@ export const handleServerMessage = async (
 
         case 'ReadyRound1':
             log('info', 'All participants have joined. Starting DKG Round 1...');
-            const serverRoster = msg.payload.roster.map((r: [number, string, string]) => ({ uid: r[0], id_hex: r[1], pubkey: r[2] }));
+            const serverRoster = msg.payload.roster.map((r: any) => ({
+                uid: r[0],
+                id_hex: r[1],
+                pubkey: typeof r[2] === 'string' ? r[2] : r[2].key
+            }));
+
             setters.setJoinedCount(msg.payload.max_signers);
             setters.setTotalParticipants(msg.payload.max_signers);
-            setters.setJoinedParticipants(serverRoster.map((p: {uid: number, pubkey: string}) => ({ uid: p.uid, pubkey: p.pubkey })));
+            setters.setJoinedParticipants(serverRoster.map((p: { uid: number, pubkey: string }) => ({ uid: p.uid, pubkey: p.pubkey })));
             state.dkgState.current.roster = serverRoster;
             state.dkgState.current.group_id = msg.payload.group_id;
             setters.setDkgStatus('Round1');
@@ -167,7 +229,7 @@ export const handleServerMessage = async (
                 state.dkgState.current.r1_secret = secret_package_hex;
 
                 const payload_hex = get_auth_payload_round1(state.sessionIdRef.current, myIdentifierHex, public_package_hex);
-                const signature = sign_message(state.privateKey, payload_hex);
+                const signature = signMessage(state.privateKey, payload_hex, state.keyType);
 
                 sendMessage(ws.current, {
                     type: 'Round1Submit',
@@ -175,7 +237,7 @@ export const handleServerMessage = async (
                         session: state.sessionIdRef.current,
                         id_hex: myIdentifierHex,
                         pkg_bincode_hex: public_package_hex,
-                        sig_ecdsa_hex: signature
+                        signature_hex: signature
                     }
                 }, log);
                 log('info', 'Round 1 package submitted.');
@@ -203,17 +265,31 @@ export const handleServerMessage = async (
                 const { secret_package_hex, outgoing_packages } = JSON.parse(dkg_part2(state.dkgState.current.r1_secret, r1_packages_for_part2));
                 state.dkgState.current.r2_secret = secret_package_hex;
 
-                const pkgs_cipher_hex: [string, string, string, string, string][] = [];
+                const pkgs_cipher: [string, any, string][] = [];
                 for (const [id_hex, pkg_hex] of Object.entries(outgoing_packages)) {
                     const recipient = state.dkgState.current.roster.find((p: any) => p.id_hex === id_hex);
                     if (!recipient) throw new Error(`Could not find public key for recipient ${id_hex}`);
-                    
-                    const { ephemeral_public_key_hex, nonce_hex, ciphertext_hex } = JSON.parse(ecies_encrypt(recipient.pubkey, pkg_hex as string));
-                    
-                    const payload_hex = get_auth_payload_round2(state.sessionIdRef.current, state.dkgState.current.identifier, id_hex, ephemeral_public_key_hex, nonce_hex, ciphertext_hex);
-                    const signature = sign_message(state.privateKey, payload_hex);
 
-                    pkgs_cipher_hex.push([id_hex, ephemeral_public_key_hex, nonce_hex, ciphertext_hex, signature]);
+                    const { ephemeral_public_key_hex, nonce_hex, ciphertext_hex } = JSON.parse(eciesEncrypt(recipient.pubkey, pkg_hex as string));
+
+                    const payload_hex = get_auth_payload_round2(state.sessionIdRef.current, state.dkgState.current.identifier, id_hex, ephemeral_public_key_hex, nonce_hex, ciphertext_hex);
+                    const signature = signMessage(state.privateKey, payload_hex, state.keyType);
+
+                    // Construct RosterPublicKey for ephemeral key
+                    let ephKeyType = 'Secp256k1';
+                    if (ephemeral_public_key_hex.length === 64) {
+                        ephKeyType = 'Ed25519';
+                    } else if (ephemeral_public_key_hex.length === 66) {
+                        ephKeyType = 'Secp256k1'; // Fallback / explicit
+                    }
+
+                    const encryptedPayload = {
+                        ephemeral_public_key: { type: ephKeyType, key: ephemeral_public_key_hex },
+                        nonce: nonce_hex,
+                        ciphertext: ciphertext_hex
+                    };
+
+                    pkgs_cipher.push([id_hex, encryptedPayload, signature]);
                 }
 
                 sendMessage(ws.current, {
@@ -221,11 +297,12 @@ export const handleServerMessage = async (
                     payload: {
                         session: state.sessionIdRef.current,
                         id_hex: state.dkgState.current.identifier,
-                        pkgs_cipher_hex: pkgs_cipher_hex
+                        pkgs_cipher: pkgs_cipher
                     }
                 }, log);
                 log('info', 'Round 2 encrypted packages submitted.');
             } catch (e: any) {
+                console.error(e);
                 log('error', `DKG Part 2 failed: ${e.message}`);
             }
             break;
@@ -236,8 +313,12 @@ export const handleServerMessage = async (
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 const received_packages = msg.payload.packages;
                 const decrypted_packages: any = {};
-                for (const [from_id_hex, eph_pub_hex, nonce_hex, ct_hex, _sig] of received_packages) {
-                    const decrypted = ecies_decrypt(state.privateKey, eph_pub_hex, nonce_hex, ct_hex);
+                for (const [from_id_hex, encrypted_payload, _sig] of received_packages) {
+                    // encrypted_payload is { ephemeral_public_key: { type:..., key:... }, nonce: "...", ciphertext: "..." }
+                    const eph_pub_key = encrypted_payload.ephemeral_public_key;
+                    const eph_pub_hex = typeof eph_pub_key === 'string' ? eph_pub_key : eph_pub_key.key;
+
+                    const decrypted = eciesDecrypt(state.privateKey, eph_pub_hex, encrypted_payload.nonce, encrypted_payload.ciphertext, state.keyType);
                     decrypted_packages[from_id_hex] = decrypted;
                 }
 
@@ -246,28 +327,34 @@ export const handleServerMessage = async (
 
                 const rosterForPart3 = new Map(state.dkgState.current.roster.map((p: any) => [p.uid, p.pubkey]));
 
+                log('info', `Calling dkg_part3 with group_id=${state.dkgState.current.group_id}`);
+
                 const { key_package_hex, group_public_key_hex } = JSON.parse(dkg_part3(
-                    state.dkgState.current.r2_secret, 
-                    r1_packages_for_part3, 
-                    decrypted_packages, 
-                    state.dkgState.current.group_id, 
-                    rosterForPart3
+                    state.dkgState.current.r2_secret,
+                    r1_packages_for_part3,
+                    decrypted_packages,
+                    state.dkgState.current.group_id,
+                    rosterForPart3,
+                    state.keyType
                 ));
+                log('info', 'DKG Part 3 success. Generated Group Key.');
+
+                setters.setRawKeyPackageHex(key_package_hex); // <--- THIS LINE WAS MISSING
                 setters.setFinalShare(key_package_hex);
                 setters.setFinalGroupKey(group_public_key_hex);
                 setters.setDkgStatus('Finalized');
-                log('success', 'DKG Ceremony Complete!');
+                log('success', 'DKG Ceremony Complete! Sending FinalizeSubmit...');
 
                 const payload_hex = get_auth_payload_finalize(state.sessionIdRef.current, state.dkgState.current.identifier, group_public_key_hex);
-                const signature = sign_message(state.privateKey, payload_hex);
+                const signature = signMessage(state.privateKey, payload_hex, state.keyType);
 
-                sendMessage(ws.current, { 
-                    type: 'FinalizeSubmit', 
-                    payload: { 
-                        session: state.sessionIdRef.current, 
-                        id_hex: state.dkgState.current.identifier, 
-                        group_vk_sec1_hex: group_public_key_hex, 
-                        sig_ecdsa_hex: signature
+                sendMessage(ws.current, {
+                    type: 'FinalizeSubmit',
+                    payload: {
+                        session: state.sessionIdRef.current,
+                        id_hex: state.dkgState.current.identifier,
+                        group_vk_sec1_hex: group_public_key_hex,
+                        signature_hex: signature
                     }
                 }, log);
 
@@ -318,11 +405,12 @@ interface SigningStateSetters {
     setRy: React.Dispatch<React.SetStateAction<string>>;
     setS: React.Dispatch<React.SetStateAction<string>>;
     setFinalMessage: React.Dispatch<React.SetStateAction<string>>;
+    setShowSignatureModal: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 export const handleSigningServerMessage = async (
     msg: any,
-    state: { privateKey: string, publicKey: string, keyPackage: string, signingState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
+    state: { privateKey: string, publicKey: string, keyPackage: string, keyType: 'secp256k1' | 'ed25519', signingState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
     setters: SigningStateSetters,
     log: (level: LogEntry['level'], message: string) => void,
     ws: React.MutableRefObject<WebSocket | null>
@@ -348,13 +436,18 @@ export const handleSigningServerMessage = async (
 
         case 'Challenge':
             try {
-                const signature = sign_challenge(state.privateKey, msg.payload.challenge);
+                const signature = signChallenge(state.privateKey, msg.payload.challenge, state.keyType);
                 log('info', 'Challenge signed. Sending login...');
+
+                const rosterKey = state.keyType === 'ed25519'
+                    ? { type: 'Ed25519', key: state.publicKey }
+                    : { type: 'Secp256k1', key: state.publicKey };
+
                 sendMessage(ws.current, {
                     type: 'Login',
                     payload: {
                         challenge: msg.payload.challenge,
-                        pubkey_hex: state.publicKey,
+                        public_key: rosterKey,
                         signature_hex: signature,
                     }
                 }, log);
@@ -362,7 +455,7 @@ export const handleSigningServerMessage = async (
                 log('error', `Failed to sign challenge: ${e.message}`);
             }
             break;
-        
+
         case 'LoginOk':
             setters.setIsServerConnected(true);
             setters.setSigningStatus('Connected');
@@ -381,10 +474,10 @@ export const handleSigningServerMessage = async (
             if (joinMatch) {
                 const joinedSuid = parseInt(joinMatch[1]);
                 const sessionId = joinMatch[2];
-                setters.setPendingSessions((prev: PendingSigningSession[]) => 
-                    prev.map(s => 
-                        s.session === sessionId 
-                            ? { ...s, joined: [...s.joined, joinedSuid] } 
+                setters.setPendingSessions((prev: PendingSigningSession[]) =>
+                    prev.map(s =>
+                        s.session === sessionId
+                            ? { ...s, joined: [...s.joined, joinedSuid] }
                             : s
                     )
                 );
@@ -407,8 +500,14 @@ export const handleSigningServerMessage = async (
             try {
                 const { nonces_hex, commitments_hex } = JSON.parse(sign_part1_commit(state.keyPackage));
                 state.signingState.current.nonces = nonces_hex;
-                
-                const myRosterEntry = msg.payload.roster.find((p: [number, string, string]) => p[2] === state.publicKey);
+
+                const myKey = state.publicKey;
+                const myRosterEntry = msg.payload.roster.find((p: any) => {
+                    const pub = p[2];
+                    if (typeof pub === 'string') return pub === myKey;
+                    return pub.key === myKey;
+                });
+
                 if (!myRosterEntry) {
                     throw new Error("Could not find myself in the session roster.");
                 }
@@ -418,7 +517,7 @@ export const handleSigningServerMessage = async (
                 state.signingState.current.msg32_hex = msg.payload.msg_keccak32_hex;
 
                 const payload_hex = get_auth_payload_sign_r1(state.sessionIdRef.current, msg.payload.group_id, myIdHex, commitments_hex);
-                const signature = sign_message(state.privateKey, payload_hex);
+                const signature = signMessage(state.privateKey, payload_hex, state.keyType);
 
                 sendMessage(ws.current, {
                     type: 'SignRound1Submit',
@@ -426,14 +525,14 @@ export const handleSigningServerMessage = async (
                         session: state.sessionIdRef.current,
                         id_hex: myIdHex,
                         commitments_bincode_hex: commitments_hex,
-                        sig_ecdsa_hex: signature,
+                        signature_hex: signature,
                     }
                 }, log);
             } catch (e: any) {
                 log('error', `Signing Part 1 failed: ${e.message}`);
             }
             break;
-        
+
         case 'SignSigningPackage':
             log('info', 'Received signing package. Starting Signing Round 2...');
             setters.setSigningStatus('Round2');
@@ -441,13 +540,13 @@ export const handleSigningServerMessage = async (
                 const signature_share_hex = sign_part2_sign(state.keyPackage, state.signingState.current.nonces, msg.payload.signing_package_bincode_hex);
 
                 const payload_hex = get_auth_payload_sign_r2(
-                    state.sessionIdRef.current, 
-                    state.signingState.current.group_id, 
-                    state.signingState.current.identifier, 
+                    state.sessionIdRef.current,
+                    state.signingState.current.group_id,
+                    state.signingState.current.identifier,
                     signature_share_hex,
                     state.signingState.current.msg32_hex
                 );
-                const signature = sign_message(state.privateKey, payload_hex);
+                const signature = signMessage(state.privateKey, payload_hex, state.keyType);
 
                 sendMessage(ws.current, {
                     type: 'SignRound2Submit',
@@ -455,7 +554,7 @@ export const handleSigningServerMessage = async (
                         session: state.sessionIdRef.current,
                         id_hex: state.signingState.current.identifier,
                         signature_share_bincode_hex: signature_share_hex,
-                        sig_ecdsa_hex: signature,
+                        signature_hex: signature,
                     }
                 }, log);
             } catch (e: any) {
@@ -473,6 +572,7 @@ export const handleSigningServerMessage = async (
             setters.setS(msg.payload.s);
             setters.setFinalMessage(msg.payload.message);
             setters.setSigningStatus('Complete');
+            setters.setShowSignatureModal(true);
             break;
     }
 };

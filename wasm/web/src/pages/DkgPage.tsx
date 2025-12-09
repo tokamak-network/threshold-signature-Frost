@@ -3,7 +3,7 @@ import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import toast, { Toaster } from 'react-hot-toast';
 import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGSession } from '../types';
 import { handleServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from '../lib';
-import init, { encrypt_share } from '../../../pkg/tokamak_frost_wasm.js';
+import init, { encrypt_share, group_vk1_to_uncompressed } from '../../../pkg/tokamak_frost_wasm.js';
 import '../App.css';
 import { useModal } from '../useModal';
 
@@ -98,24 +98,27 @@ const SessionDetailsModal = ({ session, onClose, zIndex }: { session: PendingDKG
                             </tr>
                         </thead>
                         <tbody>
-                            {session.participants_pubs.map(([suid, pubkey]) => (
-                                <tr key={suid}>
-                                    <td>{suid}{session.creator_suid === suid ? ' (Creator)' : ''}</td>
-                                    <td><code title={pubkey}>{`${pubkey.slice(0, 10)}...${pubkey.slice(-8)}`}</code></td>
-                                    <td>
-                                        <button onClick={() => handleCopy(pubkey)} className="copy-button">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                                        </button>
-                                    </td>
-                                    <td className="status-cell">
-                                        {session.joined.includes(suid) ? (
-                                            <span className="status-ok">✓</span>
-                                        ) : (
-                                            <span className="status-err">✗</span>
-                                        )}
-                                    </td>
-                                </tr>
-                            ))}
+                            {session.participants_pubs.map(([suid, pubkey]) => {
+                                const pkStr = typeof pubkey === 'string' ? pubkey : pubkey.key;
+                                return (
+                                    <tr key={suid}>
+                                        <td>{suid}{session.creator_suid === suid ? ' (Creator)' : ''}</td>
+                                        <td><code title={pkStr}>{`${pkStr.slice(0, 10)}...${pkStr.slice(-8)}`}</code></td>
+                                        <td>
+                                            <button onClick={() => handleCopy(pkStr)} className="copy-button">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                            </button>
+                                        </td>
+                                        <td className="status-cell">
+                                            {session.joined.includes(suid) ? (
+                                                <span className="status-ok">✓</span>
+                                            ) : (
+                                                <span className="status-err">✗</span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>
@@ -181,6 +184,7 @@ function DkgPage() {
     const [port, setPort] = useState('9034');
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
+    const [keyType, setKeyType] = useState<'secp256k1' | 'ed25519'>('ed25519');
     const [aesKey, setAesKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [mySuid, setMySuid] = useState<number | null>(null);
@@ -209,6 +213,11 @@ function DkgPage() {
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [finalShare, setFinalShare] = useState('');
     const [finalGroupKey, setFinalGroupKey] = useState('');
+    const [finalGroupKeyUncompressed, setFinalGroupKeyUncompressed] = useState('');
+    const [rawKeyPackageHex, setRawKeyPackageHex] = useState(''); // New state to store the raw bincode-hex key package
+    const [px, setPx] = useState('');
+    const [py, setPy] = useState('');
+
 
     // --- Refs for WebSocket and WASM state ---
     const ws = useRef<WebSocket | null>(null);
@@ -273,19 +282,27 @@ function DkgPage() {
     const handleKeyGeneration = async () => {
         try {
             if (isMetaMaskConnected) {
-                log('info', 'Deriving keys from MetaMask signature...');
-                const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync);
+                // If Secp256k1 is selected, we derive for Roster key
+                // If Ed25519 is selected, the user might want a derived Ed25519 key (deterministic from MM)
+                // The previous logic forced Secp256k1, but now we allow both.
+
+                log('info', `Deriving ${keyType} keys from MetaMask signature...`);
+                // Pass keyType to derivation function
+                const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync, keyType);
+
                 setPrivateKey(derivedKeys.private_key_hex);
                 setPublicKey(derivedKeys.public_key_hex);
                 setAesKey(derivedKeys.aes_key_hex);
-                toast.success('Roster and AES keys derived from MetaMask signature.');
+                // keyType is already set in UI state
+                toast.success(`Roster and AES keys derived from MetaMask signature (${keyType}).`);
             } else {
-                log('info', 'Generating new random keys...');
-                const keys = generateRandomKeys();
+                log('info', `Generating new random ${keyType} keys...`);
+                // Generate keys based on current keyType selection
+                const keys = generateRandomKeys(keyType);
                 setPrivateKey(keys.private_key_hex);
                 setPublicKey(keys.public_key_hex);
                 setAesKey(''); // No AES key for random generation
-                toast.success('New random ECDSA key pair generated.');
+                toast.success(`New random ${keyType} key pair generated.`);
             }
         } catch (e: any) {
             toast.error(`Key generation/derivation failed: ${e.message}`);
@@ -343,7 +360,7 @@ function DkgPage() {
         socket.onmessage = (event) => {
             log('data', `Received: ${event.data}`);
             const serverMsg = JSON.parse(event.data);
-            handleServerMessage(serverMsg, { privateKey, publicKey, isCreator, dkgState, sessionIdRef }, {
+            handleServerMessage(serverMsg, { privateKey, publicKey, keyType, isCreator, dkgState, sessionIdRef }, {
                 setSessionId,
                 setDkgStatus,
                 setPendingSessions,
@@ -357,6 +374,7 @@ function DkgPage() {
                 setJoiningSessionId,
                 setShowFinalKeyModal,
                 setMySuid,
+                setRawKeyPackageHex,
             }, log, ws);
         };
 
@@ -396,7 +414,18 @@ function DkgPage() {
 
         const sortedPubKeys = [...roster].sort();
         const participants = sortedPubKeys.map((_, index) => index + 1);
-        const participants_pubs = sortedPubKeys.map((pubkey, index) => [index + 1, pubkey]);
+
+        // Infer key type from length and construct RosterPublicKey objects
+        const participants_pubs = sortedPubKeys.map((pubkey, index) => {
+            let keyObj;
+            const cleanKey = pubkey.trim();
+            if (cleanKey.length === 64) {
+                keyObj = { type: 'Ed25519', key: cleanKey };
+            } else {
+                keyObj = { type: 'Secp256k1', key: cleanKey };
+            }
+            return [index + 1, keyObj];
+        });
 
         setTotalParticipants(max_signers);
 
@@ -436,10 +465,10 @@ function DkgPage() {
         setDkgStatus('Joined');
 
         if (mySuid) {
-            setPendingSessions((prev: PendingDKGSession[]) => 
-                prev.map(s => 
-                    s.session === sessionToJoin 
-                        ? { ...s, joined: [...s.joined, mySuid] } 
+            setPendingSessions((prev: PendingDKGSession[]) =>
+                prev.map(s =>
+                    s.session === sessionToJoin
+                        ? { ...s, joined: [...s.joined, mySuid] }
                         : s
                 )
             );
@@ -452,21 +481,44 @@ function DkgPage() {
     };
 
     const handleDownloadKey = () => {
-        if (!finalShare || !finalGroupKey) {
+        if (!rawKeyPackageHex || !finalGroupKey) {
             toast.error('No final key to download.');
             return;
         }
 
-        const keyData = {
-            finalShare: JSON.parse(finalShare), // The share is already a JSON string of the encrypted object
-            finalGroupKey,
+        const keyData: {
+            key_type: 'secp256k1' | 'ed25519';
+            encryptedKeyPackageHex: string; // This will be the bincode-hex of the encrypted KeyPackageWithMetadata
+            finalGroupKeyCompressed: string;
+            finalGroupKeyUncompressed?: string; // Optional field
+            px?: string;
+            py?: string;
+        } = {
+            key_type: keyType,
+            encryptedKeyPackageHex: finalShare, // finalShare now holds the encrypted bincode-hex
+            finalGroupKeyCompressed: finalGroupKey,
         };
+
+        if (finalGroupKeyUncompressed) {
+            keyData.finalGroupKeyUncompressed = finalGroupKeyUncompressed;
+        }
+        if (px) {
+            keyData.px = px;
+        }
+        if (py) {
+            keyData.py = py;
+        }
 
         const blob = new Blob([JSON.stringify(keyData, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'frost-key.json';
+
+        // Format: frost-key-{group_pk_prefix}-{user_pk_prefix}.json
+        const groupPrefix = finalGroupKey.slice(0, 4);
+        const userPrefix = publicKey.slice(0, 4);
+        a.download = `frost-key-${groupPrefix}-${userPrefix}.json`;
+
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -478,17 +530,41 @@ function DkgPage() {
         // Check if the share is finalized, an AES key is available, and the share is not already encrypted
         const isPlaintextHex = (str: string) => /^[0-9a-fA-F]+$/.test(str);
 
-        if (dkgStatus === 'Finalized' && finalShare && aesKey && isPlaintextHex(finalShare)) {
+        if (dkgStatus === 'Finalized' && rawKeyPackageHex && aesKey && isPlaintextHex(rawKeyPackageHex)) {
             try {
-                const encrypted = encrypt_share(aesKey, finalShare);
-                setFinalShare(encrypted);
-                log('success', 'Final share has been encrypted.');
+                // Encrypt the raw bincode-hex key package
+                const encrypted = encrypt_share(aesKey, rawKeyPackageHex);
+                setFinalShare(encrypted); // finalShare now holds the encrypted bincode-hex
+                log('success', 'Final share (key package) has been encrypted.');
             } catch (e: any) {
                 log('error', `Failed to encrypt final share: ${e.message}`);
                 toast.error('Failed to encrypt the final share.');
             }
+        } else if (dkgStatus === 'Finalized' && rawKeyPackageHex && !aesKey) {
+            // If no AES key, finalShare remains the rawKeyPackageHex (plaintext)
+            setFinalShare(rawKeyPackageHex);
+            log('info', 'Final share (key package) stored as plaintext (no AES key provided).');
         }
-    }, [dkgStatus, finalShare, aesKey]);
+    }, [dkgStatus, rawKeyPackageHex, aesKey]);
+
+    useEffect(() => {
+        if (dkgStatus === 'Finalized' && finalGroupKey) {
+            try {
+                const uncompressed = group_vk1_to_uncompressed(finalGroupKey);
+                setFinalGroupKeyUncompressed(uncompressed);
+                // Extract Px and Py
+                if (uncompressed.length === 130 && uncompressed.startsWith('04')) {
+                    setPx(uncompressed.substring(2, 66));
+                    setPy(uncompressed.substring(66, 130));
+                } else {
+                    setPx('');
+                    setPy('');
+                }
+            } catch (e: any) {
+                log('error', `Failed to uncompress group public key: ${e.message}`);
+            }
+        }
+    }, [dkgStatus, finalGroupKey]);
 
     // --- Render ---
     return (
@@ -532,6 +608,23 @@ function DkgPage() {
                 {/* Connection Panel */}
                 <div className="panel">
                     <h2>1. Identity & Connection</h2>
+
+                    <div className="form-group">
+                        <div className="toggle-switch" style={{ justifyContent: 'flex-start', marginBottom: '1rem' }}>
+                            <span style={{ marginRight: '10px' }}>Ecdsa</span>
+                            <label className="switch">
+                                <input
+                                    type="checkbox"
+                                    checked={keyType === 'ed25519'}
+                                    onChange={() => setKeyType(keyType === 'ed25519' ? 'secp256k1' : 'ed25519')}
+                                    disabled={isServerConnected}
+                                />
+                                <span className="slider round"></span>
+                            </label>
+                            <span style={{ marginLeft: '10px' }}>Eddsa</span>
+                        </div>
+                    </div>
+
                     <div className="form-group">
                         <label>Your Derived Private Key</label>
                         <input type="password" value={privateKey} onChange={e => setPrivateKey(e.target.value)} disabled={isServerConnected} />
@@ -698,8 +791,26 @@ function DkgPage() {
                         <div className="results-display">
                             <h3>Your Final Share (Encrypted)</h3>
                             <textarea readOnly value={finalShare} rows={6}></textarea>
-                            <h3>Final Group Public Key</h3>
+                            <h3>Final Group Public Key (Compressed)</h3>
                             <textarea readOnly value={finalGroupKey} rows={4}></textarea>
+                            {finalGroupKeyUncompressed && (
+                                <>
+                                    <h3>Final Group Public Key (Uncompressed)</h3>
+                                    <textarea readOnly value={finalGroupKeyUncompressed} rows={4}></textarea>
+                                    {px && py && (
+                                        <>
+                                            <div className="form-group">
+                                                <label>Px</label>
+                                                <input type="text" readOnly value={px} />
+                                            </div>
+                                            <div className="form-group">
+                                                <label>Py</label>
+                                                <input type="text" readOnly value={py} />
+                                            </div>
+                                        </>
+                                    )}
+                                </>
+                            )}
                             <button onClick={handleDownloadKey} className="grey-button">Download Key File</button>
                         </div>
                     )}
