@@ -3,7 +3,7 @@ import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import toast, { Toaster } from 'react-hot-toast';
 import type { SigningStatus, LogEntry, PendingSigningSession, CompletedSigningSession } from '../types';
 import { handleSigningServerMessage, sendMessage, generateRandomKeys, deriveKeysFromMetaMask } from '../lib';
-import init, { get_signing_prerequisites, get_key_package_metadata, keccak256, decrypt_share } from '../../../pkg/tokamak_frost_wasm.js';
+import init, { get_signing_prerequisites, decrypt_share, get_key_package_metadata, keccak256 } from '../../../pkg/tokamak_frost_wasm.js';
 import '../App.css';
 import { useModal } from '../useModal';
 
@@ -78,24 +78,27 @@ const SessionDetailsModal = ({ session, onClose, zIndex }: { session: PendingSig
                             </tr>
                         </thead>
                         <tbody>
-                            {session.participants_pubs.map(([suid, pubkey]) => (
-                                <tr key={suid}>
-                                    <td>{suid}{session.creator_suid === suid ? ' (Creator)' : ''}</td>
-                                    <td><code title={pubkey}>{`${pubkey.slice(0, 10)}...${pubkey.slice(-8)}`}</code></td>
-                                    <td>
-                                        <button onClick={() => handleCopy(pubkey)} className="copy-button">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                                        </button>
-                                    </td>
-                                    <td className="status-cell">
-                                        {session.joined.includes(suid) ? (
-                                            <span className="status-ok">✓</span>
-                                        ) : (
-                                            <span className="status-err">✗</span>
-                                        )}
-                                    </td>
-                                </tr>
-                            ))}
+                            {session.participants_pubs.map(([suid, pubkey]) => {
+                                const pkStr = typeof pubkey === 'string' ? pubkey : pubkey.key;
+                                return (
+                                    <tr key={suid}>
+                                        <td>{suid}{session.creator_suid === suid ? ' (Creator)' : ''}</td>
+                                        <td><code title={pkStr}>{`${pkStr.slice(0, 10)}...${pkStr.slice(-8)}`}</code></td>
+                                        <td>
+                                            <button onClick={() => handleCopy(pkStr)} className="copy-button">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                            </button>
+                                        </td>
+                                        <td className="status-cell">
+                                            {session.joined.includes(suid) ? (
+                                                <span className="status-ok">✓</span>
+                                            ) : (
+                                                <span className="status-err">✗</span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>
@@ -147,6 +150,60 @@ const CompletedSessionsModal = ({ sessions, onClose, onSelect, zIndex }: { sessi
     );
 };
 
+const SignatureResultModal = ({ show, onClose, signature, px, py, rx, ry, s, msgHash }: { show: boolean, onClose: () => void, signature: string, px: string, py: string, rx: string, ry: string, s: string, msgHash: string }) => {
+    const { position, modalRef, onMouseDown, onMouseMove, onMouseUp } = useModal();
+
+    if (!show) return null;
+
+    return (
+        <div className="modal-overlay" style={{ zIndex: 1000 }} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+            <div
+                ref={modalRef}
+                className="modal-content"
+                style={{ top: position.y, left: position.x, cursor: 'move' }}
+                onMouseDown={onMouseDown}
+            >
+                <div className="success-animation">
+                    <svg className="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
+                        <circle className="checkmark__circle" cx="26" cy="26" r="25" fill="none" />
+                        <path className="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8" />
+                    </svg>
+                </div>
+                <h2>Signing Complete!</h2>
+                <div className="detail-row">
+                    <strong>Message Hash:</strong>
+                    <code>{msgHash}</code>
+                </div>
+                <div className="detail-row">
+                    <strong>Signature (Hex):</strong>
+                    <textarea readOnly value={signature} rows={3}></textarea>
+                </div>
+                <div className="detail-row">
+                    <strong>Group Key (Px):</strong>
+                    <input type="text" readOnly value={px} />
+                </div>
+                <div className="detail-row">
+                    <strong>Group Key (Py):</strong>
+                    <input type="text" readOnly value={py} />
+                </div>
+                <div className="detail-row">
+                    <strong>R (x):</strong>
+                    <input type="text" readOnly value={rx} />
+                </div>
+                <div className="detail-row">
+                    <strong>R (y):</strong>
+                    <input type="text" readOnly value={ry} />
+                </div>
+                <div className="detail-row">
+                    <strong>s:</strong>
+                    <input type="text" readOnly value={s} />
+                </div>
+                <button onClick={onClose} className="grey-button">Close</button>
+            </div>
+        </div>
+    );
+};
+
 // ====================================================================
 // region: Main Signing Page Component
 // ====================================================================
@@ -163,6 +220,7 @@ function SigningPage() {
     const [port, setPort] = useState('9034');
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
+    const [keyType, setKeyType] = useState<'secp256k1' | 'ed25519'>('ed25519');
     const [aesKey, setAesKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [keyPackage, setKeyPackage] = useState('');
@@ -184,6 +242,7 @@ function SigningPage() {
     const [completedSessions, setCompletedSessions] = useState<CompletedSigningSession[]>([]);
     const [finalSignature, setFinalSignature] = useState('');
     const [joiningSessionId, setJoiningSessionId] = useState<string | null>(null);
+    const [showSignatureModal, setShowSignatureModal] = useState(false);
     const [viewingSession, setViewingSession] = useState<PendingSigningSession | CompletedSigningSession | null>(null);
     const [showCompleted, setShowCompleted] = useState(false);
     const [modalStack, setModalStack] = useState<string[]>([]);
@@ -216,6 +275,9 @@ function SigningPage() {
                 setGroupId(metadata.group_id);
                 setThreshold(metadata.threshold.toString());
                 setGroupVk(metadata.group_public_key);
+                if (metadata.roster_key_type) {
+                    setKeyType(metadata.roster_key_type === 'ed25519' ? 'ed25519' : 'secp256k1');
+                }
                 const pubkeys = Object.values(metadata.roster) as string[];
                 if (!pubkeys.includes(publicKey)) {
                     pubkeys.unshift(publicKey);
@@ -269,19 +331,49 @@ function SigningPage() {
     // --- Core Functions ---
     const handleKeyGeneration = async () => {
         try {
+            let keys;
             if (isMetaMaskConnected) {
-                const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync);
-                setPrivateKey(derivedKeys.private_key_hex);
-                setPublicKey(derivedKeys.public_key_hex);
-                setAesKey(derivedKeys.aes_key_hex);
-                toast.success('Roster and AES keys derived from MetaMask signature.');
+                log('info', `Deriving ${keyType} keys from MetaMask signature...`);
+                keys = await deriveKeysFromMetaMask(signMessageAsync, keyType);
+                toast.success(`Roster and AES keys derived from MetaMask signature (${keyType}).`);
             } else {
-                const keys = generateRandomKeys();
-                setPrivateKey(keys.private_key_hex);
-                setPublicKey(keys.public_key_hex);
-                setAesKey('');
-                toast.success('New random ECDSA key pair generated.');
+                log('info', `Generating new random ${keyType} keys...`);
+                keys = generateRandomKeys(keyType);
+                toast.success(`New random ${keyType} key pair generated.`);
             }
+
+            setPrivateKey(keys.private_key_hex);
+            setPublicKey(keys.public_key_hex);
+            setAesKey(keys.aes_key_hex || '');
+
+            // Decrypt Key Package if loaded
+            if (keyPackage) {
+                try {
+                    // keyPackage now holds the bincode-hex string (potentially encrypted)
+                    // We need to check if it's encrypted or plaintext
+                    let decryptedKeyPackage = keyPackage;
+                    try {
+                        const parsedKeyPackage = JSON.parse(keyPackage); // Try parsing as EncryptedShare JSON
+                        if (parsedKeyPackage.ciphertext_hex && parsedKeyPackage.nonce_hex) {
+                            if (!keys.aes_key_hex) {
+                                throw new Error("Key package is encrypted, but no AES key was derived. Did you use the correct wallet?");
+                            }
+                            log('info', 'Decrypting key package with derived AES key...');
+                            decryptedKeyPackage = decrypt_share(keys.aes_key_hex, keyPackage);
+                            log('success', 'Key package decrypted successfully.');
+                        }
+                    } catch (e) {
+                        // Not an EncryptedShare JSON, assume it's plaintext bincode-hex
+                        log('info', 'Key package appears to be plaintext bincode-hex.');
+                    }
+                    setKeyPackage(decryptedKeyPackage); // Update with decrypted (or confirmed plaintext) bincode-hex
+
+                } catch (decryptErr: any) {
+                    log('error', `Failed to decrypt key package: ${decryptErr.message}`);
+                    toast.error(`Decryption failed: ${decryptErr.message}`);
+                }
+            }
+
         } catch (e: any) {
             toast.error(`Key operation failed: ${e.message}`);
         }
@@ -295,26 +387,46 @@ function SigningPage() {
                 try {
                     const content = e.target?.result as string;
                     const jsonData = JSON.parse(content);
-                    if (!jsonData.finalShare) {
-                        throw new Error("Missing 'finalShare' in key file.");
-                    }
 
-                    let share = jsonData.finalShare;
-                    // Check if the share is an encrypted object
-                    if (typeof share === 'object' && share.ciphertext_hex && share.nonce_hex) {
-                        if (!aesKey) {
-                            throw new Error("Cannot decrypt share: AES key not available. Please derive keys from MetaMask first.");
+                    // --- Extract key_package_hex ---
+                    let extractedKeyPackageHex = '';
+                    if (jsonData.encryptedKeyPackageHex) {
+                        // New format from DkgPage download
+                        extractedKeyPackageHex = jsonData.encryptedKeyPackageHex;
+                        log('info', 'Detected new key file format (encryptedKeyPackageHex).');
+                    } else if (jsonData.finalShare) {
+                        // Old format from DkgPage download (finalShare was the encrypted object)
+                        // Or potentially a raw bincode-hex string if not encrypted
+                        if (typeof jsonData.finalShare === 'object' && jsonData.finalShare.ciphertext_hex) {
+                            extractedKeyPackageHex = JSON.stringify(jsonData.finalShare); // Store as JSON string of EncryptedShare
+                            log('info', 'Detected old key file format (encrypted finalShare object).');
+                        } else if (typeof jsonData.finalShare === 'string') {
+                            extractedKeyPackageHex = jsonData.finalShare; // Assume it's plaintext bincode-hex
+                            log('info', 'Detected old key file format (plaintext finalShare string).');
+                        } else {
+                            throw new Error("Unsupported 'finalShare' format in key file.");
                         }
-                        log('info', 'Encrypted share detected. Decrypting...');
-                        share = decrypt_share(aesKey, JSON.stringify(share));
-                        log('success', 'Share decrypted successfully.');
+                    } else {
+                        throw new Error("Missing 'encryptedKeyPackageHex' or 'finalShare' in key file.");
                     }
 
-                    setKeyPackage(share);
-                    log('info', 'Successfully loaded and parsed frost-key.json.');
-                    toast.success('Key file uploaded successfully!');
+                    setKeyPackage(extractedKeyPackageHex); // Set the extracted bincode-hex (potentially encrypted)
+
+                    // --- Extract other metadata for display ---
+                    if (jsonData.key_type) {
+                        setKeyType(jsonData.key_type === 'ed25519' ? 'ed25519' : 'secp256k1');
+                        log('info', `Detected Key Type (from file header): ${jsonData.key_type}`);
+                    }
+                    if (jsonData.finalGroupKeyCompressed) {
+                        setGroupVk(jsonData.finalGroupKeyCompressed);
+                    } else if (jsonData.finalGroupKey) {
+                        setGroupVk(jsonData.finalGroupKey);
+                    }
+
+                    log('info', 'Successfully loaded frost-key.json. Please derive/generate keys to decrypt if necessary.');
+                    toast.success('Key file uploaded. Now derive/generate your keys.');
                 } catch (err: any) {
-                    log('error', `Failed to parse or decrypt key file: ${err.message}`);
+                    log('error', `Failed to parse key file: ${err.message}`);
                     toast.error(`Error reading key file: ${err.message}`);
                 }
             };
@@ -350,7 +462,7 @@ function SigningPage() {
 
         socket.onmessage = (event) => {
             const serverMsg = JSON.parse(event.data);
-            handleSigningServerMessage(serverMsg, { privateKey, publicKey, keyPackage, signingState, sessionIdRef }, {
+            handleSigningServerMessage(serverMsg, { privateKey, publicKey, keyPackage, keyType, signingState, sessionIdRef }, {
                 setSessionId,
                 setSigningStatus,
                 setPendingSessions,
@@ -364,6 +476,7 @@ function SigningPage() {
                 setRy,
                 setS,
                 setFinalMessage,
+                setShowSignatureModal,
             }, log, ws);
         };
 
@@ -374,7 +487,7 @@ function SigningPage() {
             setJoiningSessionId(null);
         };
     };
-    
+
     const handleDisconnect = () => {
         if (ws.current) {
             ws.current.close();
@@ -395,9 +508,18 @@ function SigningPage() {
             toast.error('All participant public keys must be filled.');
             return;
         }
-        
+
         const participants = roster.map((_, i) => i + 1);
-        const participants_pubs = roster.map((pubkey, i) => [i + 1, pubkey]);
+        const participants_pubs = roster.map((pubkey, i) => {
+            let keyObj;
+            const cleanKey = pubkey.trim();
+            if (cleanKey.length === 64) {
+                keyObj = { type: 'Ed25519', key: cleanKey };
+            } else {
+                keyObj = { type: 'Secp256k1', key: cleanKey };
+            }
+            return [i + 1, keyObj];
+        });
 
         sendMessage(ws.current, {
             type: 'AnnounceSignSession',
@@ -433,10 +555,10 @@ function SigningPage() {
             }, log);
 
             if (mySuid) {
-                setPendingSessions((prev: PendingSigningSession[]) => 
-                    prev.map(s => 
-                        s.session === session 
-                            ? { ...s, joined: [...s.joined, mySuid] } 
+                setPendingSessions((prev: PendingSigningSession[]) =>
+                    prev.map(s =>
+                        s.session === session
+                            ? { ...s, joined: [...s.joined, mySuid] }
                             : s
                     )
                 );
@@ -461,6 +583,17 @@ function SigningPage() {
     return (
         <div className="App">
             <Toaster position="top-center" reverseOrder={false} />
+            <SignatureResultModal
+                show={showSignatureModal}
+                onClose={() => setShowSignatureModal(false)}
+                signature={finalSignature}
+                px={px}
+                py={py}
+                rx={rx}
+                ry={ry}
+                s={s}
+                msgHash={finalMessage}
+            />
             {viewingSession && (
                 <SessionDetailsModal
                     session={viewingSession}
@@ -498,6 +631,31 @@ function SigningPage() {
                 {/* Connection & Key Panel */}
                 <div className="panel">
                     <h2>1. Identity & Keys</h2>
+
+                    <div className="form-group">
+                        <div className="toggle-switch" style={{ justifyContent: 'flex-start', marginBottom: '1rem' }}>
+                            <span style={{ marginRight: '10px' }}>Ecdsa</span>
+                            <label className="switch">
+                                <input
+                                    type="checkbox"
+                                    checked={keyType === 'ed25519'}
+                                    onChange={() => {}} // It's disabled, so this won't be called.
+                                    disabled={true}
+                                />
+                                <span className="slider round"></span>
+                            </label>
+                            <span style={{ marginLeft: '10px' }}>Eddsa</span>
+                        </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label>Your DKG Secret Key Package</label>
+                        <textarea readOnly value={keyPackage} onChange={e => setKeyPackage(e.target.value)} rows={4} placeholder="Upload your secret key package from the DKG ceremony..."></textarea>
+                        <input type="file" ref={fileInputRef} onChange={handleKeyFileUpload} accept=".json" style={{ display: 'none' }} />
+                        <button onClick={() => fileInputRef.current?.click()} className="grey-button">Upload Key File</button>
+                    </div>
+                    <hr />
+
                     <div className="form-group">
                         <label>Your Roster Private Key</label>
                         <input type="password" value={privateKey} onChange={e => setPrivateKey(e.target.value)} disabled={isServerConnected} />
@@ -506,16 +664,9 @@ function SigningPage() {
                         <label>Your Roster Public Key</label>
                         <input type="text" value={publicKey} onChange={e => setPublicKey(e.target.value)} disabled={isServerConnected} />
                     </div>
-                    <button onClick={handleKeyGeneration} disabled={isServerConnected} className={isMetaMaskConnected ? 'metamask-button' : 'generate-button'}>
+                    <button onClick={handleKeyGeneration} disabled={isServerConnected || !keyPackage} className={isMetaMaskConnected ? 'metamask-button' : 'generate-button'}>
                         {isMetaMaskConnected ? 'Derive Roster Key' : 'Generate New Random Keys'}
                     </button>
-                    <hr />
-                    <div className="form-group">
-                        <label>Your DKG Secret Key Package</label>
-                        <textarea readOnly value={keyPackage} onChange={e => setKeyPackage(e.target.value)} rows={4} placeholder="Upload your secret key package from the DKG ceremony..."></textarea>
-                        <input type="file" ref={fileInputRef} onChange={handleKeyFileUpload} accept=".json" style={{ display: 'none' }} />
-                        <button onClick={() => fileInputRef.current?.click()} className="grey-button" disabled={!aesKey}>Upload Key File</button>
-                    </div>
                     <hr />
                     <div className="form-group">
                         <label>F-Server IP:Port</label>
@@ -527,7 +678,7 @@ function SigningPage() {
                     {isServerConnected ? (
                         <button onClick={handleDisconnect} className="disconnect-button">Disconnect</button>
                     ) : (
-                        <button onClick={handleConnect} className="grey-button">Connect & Login</button>
+                        <button onClick={handleConnect} className="grey-button" disabled={!privateKey || !aesKey}>Connect & Login</button>
                     )}
                 </div>
 
