@@ -1335,11 +1335,14 @@ async fn handle_client_text(
             let mut msg32 = [0u8; 32];
             msg32.copy_from_slice(&msg_bytes);
 
+            let clean_msg_str = message.strip_prefix("0x").unwrap_or(&message);
+            let msg_raw_bytes = hex::decode(clean_msg_str).context("message is not valid hex")?;
+
             let mut hasher = Keccak256::new();
-            hasher.update(message.as_bytes());
+            hasher.update(&msg_raw_bytes);
             let calculated_hash: [u8; 32] = hasher.finalize().into();
             if calculated_hash != msg32 {
-                return Err(anyhow!("message and message_hex mismatch"));
+                return Err(anyhow!("message (hex decoded) hash and message_hex mismatch"));
             }
 
             let mut roster_vec = Vec::new();
@@ -1650,4 +1653,23 @@ async fn handle_client_text(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use sha2::Digest;
+    use sha3::Keccak256;
+
+    #[test]
+    fn test_keccak(){
+        let message = "hello frost";
+        let mut hash = Keccak256::new();
+        hash.update(message);
+        let calculated_hash: [u8; 32] = hash.finalize().into();
+        let hex = hex::encode(calculated_hash);
+        assert_eq!(
+            hex,
+            "eb8e66ce49a7e18006f2af672276fc06d1e2d44be5543e695dd45b36be193ca1");
+
+    }
 }

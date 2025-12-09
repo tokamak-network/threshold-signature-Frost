@@ -70,8 +70,10 @@ pub fn group_vk1_to_uncompressed(group_vk_sec1_hex: &str) -> String {
 
 #[wasm_bindgen]
 pub fn keccak256(message: &str) -> String {
+    let clean = message.strip_prefix("0x").unwrap_or(message);
+    let bytes = hex::decode(clean).expect("keccak256 input must be valid hex");
     let mut hasher = Keccak256::new();
-    hasher.update(message.as_bytes());
+    hasher.update(&bytes);
     let result = hasher.finalize();
     hex::encode(result)
 }
