@@ -33,7 +33,7 @@ struct SignatureOut {
 
 fn read_json<T: for<'de> serde::Deserialize<'de>>(p: &PathBuf) -> Result<T> {
     let s = fs::read_to_string(p)?;
-    Ok(serde_json::from_str(&s).with_context(|| format!("parsing {}", p.display()))?)
+    serde_json::from_str(&s).with_context(|| format!("parsing {}", p.display()))
 }
 
 fn hex32(s: &str) -> Result<[u8; 32]> {
@@ -58,9 +58,8 @@ fn main() -> Result<()> {
     sec1_uncompressed[1..33].copy_from_slice(&px);
     sec1_uncompressed[33..65].copy_from_slice(&py);
 
-    let ep = EncodedPoint::from_bytes(&sec1_uncompressed)?;
-    let affine = AffinePoint::from_encoded_point(&ep)
-        .unwrap();
+    let ep = EncodedPoint::from_bytes(sec1_uncompressed)?;
+    let affine = AffinePoint::from_encoded_point(&ep).unwrap();
 
     // For frost_secp256k1, element serialization is compressed SEC1
     let compressed = affine.to_encoded_point(true); // 33-byte 0x02/0x03 || X
@@ -77,9 +76,8 @@ fn main() -> Result<()> {
     r_uncompressed[0] = 0x04;
     r_uncompressed[1..33].copy_from_slice(&rx);
     r_uncompressed[33..65].copy_from_slice(&ry);
-    let r_ep = EncodedPoint::from_bytes(&r_uncompressed)?;
-    let r_aff = AffinePoint::from_encoded_point(&r_ep)
-        .expect("invalid (rx,ry) point on curve");
+    let r_ep = EncodedPoint::from_bytes(r_uncompressed)?;
+    let r_aff = AffinePoint::from_encoded_point(&r_ep).expect("invalid (rx,ry) point on curve");
     let r_compressed = r_aff.to_encoded_point(true);
 
     // FROST signature serialization = serialize_element(R) || serialize_scalar(z)
@@ -90,7 +88,10 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow!("signature deserialize failed: {e}"))?;
 
     // Message is a 32-byte Keccak digest in our pipeline
-    let msg_hex = sig_out.message.strip_prefix("0x").unwrap_or(&sig_out.message);
+    let msg_hex = sig_out
+        .message
+        .strip_prefix("0x")
+        .unwrap_or(&sig_out.message);
     let msg = hex::decode(msg_hex)?;
     let msg32: [u8; 32] = msg
         .as_slice()

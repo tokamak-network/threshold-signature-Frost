@@ -231,7 +231,9 @@ function SigningPage() {
     const [groupId, setGroupId] = useState('');
     const [threshold, setThreshold] = useState('');
     const [roster, setRoster] = useState<string[]>([]);
-    const [messageToSign, setMessageToSign] = useState('hello frost');
+    // Valid hex default for "hello frost"
+    const [messageAscii, setMessageAscii] = useState('hello frost');
+    const [messageHex, setMessageHex] = useState('68656c6c6f2066726f7374');
     const [messageHash, setMessageHash] = useState('');
     const [groupVk, setGroupVk] = useState('');
     // @ts-expect-error
@@ -290,14 +292,46 @@ function SigningPage() {
         }
     }, [keyPackage, publicKey]);
 
+    // --- Message Input Handlers ---
+    const asciiToHex = (str: string) => {
+        const arr = new TextEncoder().encode(str);
+        return Array.from(arr, byte => byte.toString(16).padStart(2, '0')).join('');
+    };
+
+    const hexToAscii = (hex: string) => {
+        try {
+            // Remove 0x prefix if present and any non-hex chars for safety
+            const clean = hex.replace(/^0x/, '').replace(/[^0-9a-fA-F]/g, '');
+            if (clean.length % 2 !== 0) return null; // Incomplete hex
+            const bytes = new Uint8Array(clean.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+            return new TextDecoder().decode(bytes);
+        } catch (e) {
+            return null; // Decoding failed
+        }
+    };
+
+    const handleAsciiChange = (val: string) => {
+        setMessageAscii(val);
+        const hex = asciiToHex(val);
+        setMessageHex(hex);
+    };
+
+    const handleHexChange = (val: string) => {
+        setMessageHex(val);
+        const ascii = hexToAscii(val);
+        if (ascii !== null) {
+            setMessageAscii(ascii);
+        }
+    };
+
     useEffect(() => {
         try {
-            const hash = keccak256(messageToSign);
+            const hash = keccak256(messageHex);
             setMessageHash(hash);
         } catch (e) {
             setMessageHash('');
         }
-    }, [messageToSign]);
+    }, [messageHex]);
 
     useEffect(() => {
         if (viewingSession) {
@@ -529,7 +563,7 @@ function SigningPage() {
                 participants,
                 participants_pubs,
                 group_vk_sec1_hex: groupVk,
-                message: messageToSign,
+                message: messageHex,
                 message_hex: messageHash,
             }
         }, log);
@@ -639,7 +673,7 @@ function SigningPage() {
                                 <input
                                     type="checkbox"
                                     checked={keyType === 'ed25519'}
-                                    onChange={() => {}} // It's disabled, so this won't be called.
+                                    onChange={() => { }} // It's disabled, so this won't be called.
                                     disabled={true}
                                 />
                                 <span className="slider round"></span>
@@ -704,8 +738,12 @@ function SigningPage() {
                                 <input type="text" value={groupId} disabled />
                             </div>
                             <div className="form-group">
-                                <label>Message to Sign</label>
-                                <input type="text" value={messageToSign} onChange={e => setMessageToSign(e.target.value)} />
+                                <label>Message to Sign (ASCII)</label>
+                                <input type="text" value={messageAscii} onChange={e => handleAsciiChange(e.target.value)} />
+                            </div>
+                            <div className="form-group">
+                                <label>Message to Sign (Hex)</label>
+                                <input type="text" value={messageHex} onChange={e => handleHexChange(e.target.value)} />
                             </div>
                             <div className="form-group">
                                 <label>Data to Sign (Keccak256 Hash)</label>
