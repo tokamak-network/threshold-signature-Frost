@@ -1,16 +1,35 @@
 [workspace]
 resolver = "2"
-members = ["keygen/trusted","keygen/dkg", "fserver","signing", "offchain-verify", "wasm"]
+members = [
+    "helper",
+    "keygen/trusted",
+    "keygen/dkg",
+    "fserver",
+    "signing",
+    "offchain-verify",
+    "wasm",
+]
 
 [workspace.package]
 edition = "2021"
 
 [workspace.dependencies]
 # Zcash Foundation FROST crates (git to ensure API compatibility)
-frost-core = { git = "https://github.com/ZcashFoundation/frost", package = "frost-core", features = ["std", "serde"] }
-frost-secp256k1 = { git = "https://github.com/ZcashFoundation/frost", package = "frost-secp256k1", features = ["std", "serde"] }
+frost-core = { git = "https://github.com/ZcashFoundation/frost", package = "frost-core", features = [
+    "std",
+    "serde",
+] }
+frost-secp256k1 = { git = "https://github.com/ZcashFoundation/frost", package = "frost-secp256k1", features = [
+    "std",
+    "serde",
+] }
 
-k256 = { version = "0.13", features = ["arithmetic","ecdsa", "sha256","ecdh"] }
+k256 = { version = "0.13", features = [
+    "arithmetic",
+    "ecdsa",
+    "sha256",
+    "ecdh",
+] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,3 +41,9 @@ anyhow = "1"
 signature = "2"
 aes-gcm = { version = "0.10.3", features = ["aes"] }
 sha2 = "0.10"
+eddsa = { git = "https://github.com/tokamak-network/EdDSA-Jubjub.git", package = "eddsa" }
+ark-ff = "0.4"
+ark-ed-on-bls12-381 = "0.4"
+ark-ec = "0.4"
+ark-serialize = "0.4"
+blake3 = "1"

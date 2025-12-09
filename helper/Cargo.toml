@@ -1,0 +1,27 @@
+[package]
+name = "helper"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+frost-core = { workspace = true, features = ["serde"] }
+frost-secp256k1 = { workspace = true, features = ["serde"] }
+k256 = { workspace = true, features = ["ecdsa", "ecdh"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+bincode.workspace = true
+hex.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+sha3.workspace = true
+signature = { workspace = true, features = ["digest"] }
+aes-gcm = { workspace = true, features = ["aes"] }
+sha2.workspace = true
+rand.workspace = true
+eddsa.workspace = true
+ark-ff.workspace = true
+ark-ed-on-bls12-381.workspace = true
+blake3.workspace = true
+ark-ec.workspace = true
+ark-serialize.workspace = true

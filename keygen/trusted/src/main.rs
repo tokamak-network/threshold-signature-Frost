@@ -8,7 +8,10 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
-#[command(name = "keygen", about = "Dealer-based FROST(secp256k1) key generation")]
+#[command(
+    name = "keygen",
+    about = "Dealer-based FROST(secp256k1) key generation"
+)]
 struct Args {
     /// Minimum number of signers required to produce a signature
     #[arg(long)]
@@ -62,9 +65,9 @@ fn main() -> Result<()> {
         args.max_signers,
         args.min_signers,
         frost::keys::IdentifierList::Default,
-        &mut rng,
+        rng,
     )
-        .context("frost dealer keygen failed")?;
+    .context("frost dealer keygen failed")?;
 
     // Persist group info (minimal)
     let vk_sec1 = pubkey_package
@@ -98,17 +101,19 @@ fn main() -> Result<()> {
             verifying_share_bincode_hex: hex::encode(bincode::serialize(verifying_share)?),
             group_vk_sec1_hex: hex::encode(&vk_sec1),
         };
-        write_json(
-            args.out_dir.join(format!("share_{}.json", id_hex)),
-            &sf,
-        )?;
+        write_json(args.out_dir.join(format!("share_{}.json", id_hex)), &sf)?;
         println!(
             "Wrote participant share: {}",
-            args.out_dir.join(format!("share_{}.json", id_hex)).display()
+            args.out_dir
+                .join(format!("share_{}.json", id_hex))
+                .display()
         );
     }
 
-    println!("Wrote group info: {}", args.out_dir.join("group.json").display());
+    println!(
+        "Wrote group info: {}",
+        args.out_dir.join("group.json").display()
+    );
     println!("Done.");
     Ok(())
 }

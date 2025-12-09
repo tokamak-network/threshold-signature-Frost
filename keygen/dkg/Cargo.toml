@@ -25,3 +25,4 @@ tokio-tungstenite = "0.21"
 tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 rand_core = "0.6.4"
 uuid = { version = "1.8.0", features = ["v4", "serde"] }
+helper = { path = "../../helper" }

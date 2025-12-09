@@ -1,8 +1,8 @@
 #![cfg(test)]
 use super::*;
-use wasm_bindgen_test::*;
 use k256::ecdsa::VerifyingKey;
-use signature::Verifier;
+use signature::DigestVerifier;
+use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -28,30 +28,61 @@ fn create_roster_js_map(entries: Vec<(u32, &str)>) -> JsValue {
 fn test_generate_and_derive_keys() {
     // Test random key generation
     let keypair_json = generate_ecdsa_keypair();
-    let keypair: serde_json::Value = serde_json::from_str(&keypair_json).expect("Failed to parse keypair JSON");
-    let priv_key_hex = keypair["private_key_hex"].as_str().expect("Missing private_key_hex");
-    let pub_key_hex = keypair["public_key_hex"].as_str().expect("Missing public_key_hex");
+    let keypair: serde_json::Value =
+        serde_json::from_str(&keypair_json).expect("Failed to parse keypair JSON");
+    let priv_key_hex = keypair["private_key_hex"]
+        .as_str()
+        .expect("Missing private_key_hex");
+    let pub_key_hex = keypair["public_key_hex"]
+        .as_str()
+        .expect("Missing public_key_hex");
 
     let sk_bytes = hex::decode(priv_key_hex).expect("Failed to decode private key hex");
     let sk = K256SecretKey::from_slice(&sk_bytes).expect("Failed to create SecretKey from slice");
-    let pk = VerifyingKey::from_sec1_bytes(&hex::decode(pub_key_hex).expect("Failed to decode public key hex")).expect("Failed to create VerifyingKey from SEC1 bytes");
-    assert_eq!(&VerifyingKey::from(&sk.public_key()), &pk, "Public key does not match private key");
+    let pk = VerifyingKey::from_sec1_bytes(
+        &hex::decode(pub_key_hex).expect("Failed to decode public key hex"),
+    )
+    .expect("Failed to create VerifyingKey from SEC1 bytes");
+    assert_eq!(
+        &VerifyingKey::from(&sk.public_key()),
+        &pk,
+        "Public key does not match private key"
+    );
 
     // Test deterministic key derivation
     let dummy_signature = hex::encode([1; 64]);
-    let derived_json = derive_keys_from_signature(&dummy_signature).expect("derive_keys_from_signature failed");
-    let derived_keypair: serde_json::Value = serde_json::from_str(&derived_json).expect("Failed to parse derived keypair JSON");
-    let derived_priv_hex = derived_keypair["private_key_hex"].as_str().expect("Missing derived private_key_hex");
-    let derived_pub_hex = derived_keypair["public_key_hex"].as_str().expect("Missing derived public_key_hex");
+    let derived_json = derive_keys_from_signature(&dummy_signature, "ecdsa")
+        .expect("derive_keys_from_signature failed");
+    let derived_keypair: serde_json::Value =
+        serde_json::from_str(&derived_json).expect("Failed to parse derived keypair JSON");
+    let derived_priv_hex = derived_keypair["private_key_hex"]
+        .as_str()
+        .expect("Missing derived private_key_hex");
+    let derived_pub_hex = derived_keypair["public_key_hex"]
+        .as_str()
+        .expect("Missing derived public_key_hex");
 
-    let derived_sk_bytes = hex::decode(derived_priv_hex).expect("Failed to decode derived private key hex");
-    let derived_sk = K256SecretKey::from_slice(&derived_sk_bytes).expect("Failed to create SecretKey from derived slice");
-    let derived_pk = VerifyingKey::from_sec1_bytes(&hex::decode(derived_pub_hex).expect("Failed to decode derived public key hex")).expect("Failed to create VerifyingKey from derived SEC1 bytes");
-    assert_eq!(&VerifyingKey::from(&derived_sk.public_key()), &derived_pk, "Derived public key does not match derived private key");
+    let derived_sk_bytes =
+        hex::decode(derived_priv_hex).expect("Failed to decode derived private key hex");
+    let derived_sk = K256SecretKey::from_slice(&derived_sk_bytes)
+        .expect("Failed to create SecretKey from derived slice");
+    let derived_pk = VerifyingKey::from_sec1_bytes(
+        &hex::decode(derived_pub_hex).expect("Failed to decode derived public key hex"),
+    )
+    .expect("Failed to create VerifyingKey from derived SEC1 bytes");
+    assert_eq!(
+        &VerifyingKey::from(&derived_sk.public_key()),
+        &derived_pk,
+        "Derived public key does not match derived private key"
+    );
 
     // Ensure it's deterministic
-    let derived_json_2 = derive_keys_from_signature(&dummy_signature).expect("Second derive_keys_from_signature failed");
-    assert_eq!(derived_json, derived_json_2, "Key derivation is not deterministic");
+    let derived_json_2 = derive_keys_from_signature(&dummy_signature, "ecdsa")
+        .expect("Second derive_keys_from_signature failed");
+    assert_eq!(
+        derived_json, derived_json_2,
+        "Key derivation is not deterministic"
+    );
 }
 
 #[wasm_bindgen_test]
@@ -67,10 +98,16 @@ fn test_sign_and_verify() {
     let signature_hex = sign_challenge(priv_key_hex, &challenge).unwrap();
     let sig_bytes = hex::decode(signature_hex).unwrap();
     let signature = EcdsaSignature::from_der(&sig_bytes).unwrap();
-    let challenge_bytes = uuid::Uuid::parse_str(&challenge).unwrap().as_bytes().to_vec();
+    let challenge_bytes = uuid::Uuid::parse_str(&challenge)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
     let mut hasher = Keccak256::new();
     hasher.update(&challenge_bytes);
-    assert!(pk.verify_digest(hasher, &signature).is_ok(), "Challenge signature verification failed");
+    assert!(
+        pk.verify_digest(hasher, &signature).is_ok(),
+        "Challenge signature verification failed"
+    );
 
     // Test sign_message
     let message = "hello world";
@@ -80,7 +117,10 @@ fn test_sign_and_verify() {
     let signature_2 = EcdsaSignature::from_der(&sig_bytes_2).unwrap();
     let mut hasher_2 = Keccak256::new();
     hasher_2.update(message.as_bytes());
-    assert!(pk.verify_digest(hasher_2, &signature_2).is_ok(), "Message signature verification failed");
+    assert!(
+        pk.verify_digest(hasher_2, &signature_2).is_ok(),
+        "Message signature verification failed"
+    );
 }
 
 #[wasm_bindgen_test]
@@ -116,7 +156,10 @@ fn test_ecies_round_trip() {
     let decrypted_hex = ecies_decrypt(priv_key_hex, eph_pub_hex, nonce_hex, ct_hex).unwrap();
     let decrypted_plaintext = String::from_utf8(hex::decode(decrypted_hex).unwrap()).unwrap();
 
-    assert_eq!(plaintext, decrypted_plaintext, "ECIES decrypted text does not match original plaintext");
+    assert_eq!(
+        plaintext, decrypted_plaintext,
+        "ECIES decrypted text does not match original plaintext"
+    );
 }
 
 #[wasm_bindgen_test]
@@ -151,21 +194,35 @@ fn test_dkg_and_signing_round_trip() {
     let p1_part2_json = dkg_part2(p1_secret1_hex, p1_r1_map).unwrap();
     let p1_part2: serde_json::Value = serde_json::from_str(&p1_part2_json).unwrap();
     let p1_secret2_hex = p1_part2["secret_package_hex"].as_str().unwrap();
-    let p1_outgoing: BTreeMap<String, String> = serde_json::from_value(p1_part2["outgoing_packages"].clone()).unwrap();
-    let p1_to_p2_pkg_hex = p1_outgoing.get(&p2_id_hex).expect("P1 should have a package for P2");
+    let p1_outgoing: BTreeMap<String, String> =
+        serde_json::from_value(p1_part2["outgoing_packages"].clone()).unwrap();
+    let p1_to_p2_pkg_hex = p1_outgoing
+        .get(&p2_id_hex)
+        .expect("P1 should have a package for P2");
 
     // P2 creates packages for P1
     let p2_r1_map = create_js_map(vec![(&p1_id_hex, p1_public1_hex)]);
     let p2_part2_json = dkg_part2(p2_secret1_hex, p2_r1_map).unwrap();
     let p2_part2: serde_json::Value = serde_json::from_str(&p2_part2_json).unwrap();
     let p2_secret2_hex = p2_part2["secret_package_hex"].as_str().unwrap();
-    let p2_outgoing: BTreeMap<String, String> = serde_json::from_value(p2_part2["outgoing_packages"].clone()).unwrap();
-    let p2_to_p1_pkg_hex = p2_outgoing.get(&p1_id_hex).expect("P2 should have a package for P1");
+    let p2_outgoing: BTreeMap<String, String> =
+        serde_json::from_value(p2_part2["outgoing_packages"].clone()).unwrap();
+    let p2_to_p1_pkg_hex = p2_outgoing
+        .get(&p1_id_hex)
+        .expect("P2 should have a package for P1");
 
     // --- Round 3 (Finalize for P1) ---
     let p1_r1_map_part3 = create_js_map(vec![(&p2_id_hex, p2_public1_hex)]);
     let p1_r2_map_part3 = create_js_map(vec![(&p2_id_hex, p2_to_p1_pkg_hex)]);
-    let p1_part3_json = dkg_part3(p1_secret2_hex, p1_r1_map_part3, p1_r2_map_part3, group_id, roster.clone()).unwrap();
+    let p1_part3_json = dkg_part3(
+        p1_secret2_hex,
+        p1_r1_map_part3,
+        p1_r2_map_part3,
+        group_id,
+        roster.clone(),
+        "ecdsa",
+    )
+    .unwrap();
     let p1_part3: serde_json::Value = serde_json::from_str(&p1_part3_json).unwrap();
     let p1_key_package_hex = p1_part3["key_package_hex"].as_str().unwrap();
     let group_public_key_hex = p1_part3["group_public_key_hex"].as_str().unwrap();
@@ -173,13 +230,30 @@ fn test_dkg_and_signing_round_trip() {
     // --- Round 3 (Finalize for P2) ---
     let p2_r1_map_part3 = create_js_map(vec![(&p1_id_hex, p1_public1_hex)]);
     let p2_r2_map_part3 = create_js_map(vec![(&p1_id_hex, p1_to_p2_pkg_hex)]);
-    let p2_part3_json = dkg_part3(p2_secret2_hex, p2_r1_map_part3, p2_r2_map_part3, group_id, roster.clone()).unwrap();
+    let p2_part3_json = dkg_part3(
+        p2_secret2_hex,
+        p2_r1_map_part3,
+        p2_r2_map_part3,
+        group_id,
+        roster.clone(),
+        "ecdsa",
+    )
+    .unwrap();
     let p2_part3: serde_json::Value = serde_json::from_str(&p2_part3_json).unwrap();
     let p2_key_package_hex = p2_part3["key_package_hex"].as_str().unwrap();
 
-    assert!(!p1_key_package_hex.is_empty(), "P1 key package should not be empty");
-    assert!(!p2_key_package_hex.is_empty(), "P2 key package should not be empty");
-    assert!(!group_public_key_hex.is_empty(), "Group public key should not be empty");
+    assert!(
+        !p1_key_package_hex.is_empty(),
+        "P1 key package should not be empty"
+    );
+    assert!(
+        !p2_key_package_hex.is_empty(),
+        "P2 key package should not be empty"
+    );
+    assert!(
+        !group_public_key_hex.is_empty(),
+        "Group public key should not be empty"
+    );
 
     // ==================================
     // Signing Ceremony Simulation
@@ -201,8 +275,10 @@ fn test_dkg_and_signing_round_trip() {
     let mut msg_hash_bytes = [0u8; 32];
     msg_hash_bytes.copy_from_slice(msg_hash.as_slice());
 
-    let p1_commitments: frost::round1::SigningCommitments = bincode::deserialize(&hex::decode(p1_commitments_hex).unwrap()).unwrap();
-    let p2_commitments: frost::round1::SigningCommitments = bincode::deserialize(&hex::decode(p2_commitments_hex).unwrap()).unwrap();
+    let p1_commitments: frost::round1::SigningCommitments =
+        bincode::deserialize(&hex::decode(p1_commitments_hex).unwrap()).unwrap();
+    let p2_commitments: frost::round1::SigningCommitments =
+        bincode::deserialize(&hex::decode(p2_commitments_hex).unwrap()).unwrap();
 
     let mut commitments_map = BTreeMap::new();
     let p1_id: frost::Identifier = bincode::deserialize(&hex::decode(p1_id_hex).unwrap()).unwrap();
@@ -213,6 +289,10 @@ fn test_dkg_and_signing_round_trip() {
     let signing_package = frost::SigningPackage::new(commitments_map, &msg_hash_bytes);
     let signing_package_hex = hex::encode(bincode::serialize(&signing_package).unwrap());
 
-    let p1_sig_share_hex = sign_part2_sign(p1_key_package_hex, p1_nonces_hex, &signing_package_hex).unwrap();
-    assert!(!p1_sig_share_hex.is_empty(), "P1 Signature share should not be empty");
+    let p1_sig_share_hex =
+        sign_part2_sign(p1_key_package_hex, p1_nonces_hex, &signing_package_hex).unwrap();
+    assert!(
+        !p1_sig_share_hex.is_empty(),
+        "P1 Signature share should not be empty"
+    );
 }

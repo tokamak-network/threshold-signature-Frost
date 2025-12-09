@@ -2,7 +2,7 @@
 
 This directory contains the core cryptographic library for the Tokamak-FROST client, compiled to WebAssembly (WASM). It exposes a suite of functions to JavaScript, enabling web applications to perform complex cryptographic operations for Distributed Key Generation (DKG) and interactive threshold signing using the FROST protocol.
 
-The library handles ECDSA key management, message signing, ECIES encryption/decryption, and the multi-round protocols required for FROST.
+The library handles both ECDSA (secp256k1) and EdDSA (Ed25519) key management, message signing, ECIES encryption/decryption, and the multi-round protocols required for FROST.
 
 ## How to Build
 
@@ -50,7 +50,7 @@ Sets up a panic hook to forward Rust panics to the browser's developer console. 
 
 ---
 
-### Hashing Utilities
+### Hashing & Conversion Utilities
 
 #### `keccak256(message: string)`
 Computes the Keccak-256 hash of a given string message.
@@ -59,40 +59,88 @@ Computes the Keccak-256 hash of a given string message.
   - `message`: `string` - The input message to hash.
 - **Output:** `string` - The 32-byte hash, returned as a hex-encoded string.
 
+#### `to_compressed_point(uncompressed_point_hex: string)`
+Converts an uncompressed secp256k1 public key point to its compressed form.
+
+- **Inputs:**
+  - `uncompressed_point_hex`: `string` - The uncompressed public key, hex-encoded.
+- **Output:** `string` - A JSON string containing the `point` in compressed hex format.
+
 ---
 
 ### Key Generation & Signing Utilities
 
 #### `generate_ecdsa_keypair()`
-Generates a new random secp256k1 key pair.
+Generates a new random secp256k1 (ECDSA) key pair.
 
 - **Inputs:** None
 - **Output:** `string` - A JSON string containing:
   - `private_key_hex`: The 32-byte private key, hex-encoded.
   - `public_key_hex`: The 33-byte compressed public key, hex-encoded.
 
-#### `derive_key_from_signature(signature_hex: string)`
-Deterministically derives a secp256k1 key pair from the Keccak-256 hash of a given signature. This is useful for creating session-specific or ephemeral keys.
+#### `generate_eddsa_keypair()`
+Generates a new random Ed25519 (EdDSA) key pair.
+
+- **Inputs:** None
+- **Output:** `string` - A JSON string containing:
+  - `private_key_hex`: The 32-byte private key, hex-encoded.
+  - `public_key_hex`: The 32-byte compressed public key, hex-encoded.
+
+#### `derive_keys_from_signature(signature_hex: string, key_type: string)`
+Deterministically derives a key pair (ECDSA or EdDSA) and a symmetric AES key from a given signature.
 
 - **Inputs:**
   - `signature_hex`: `string` - An ECDSA signature, hex-encoded.
-- **Output:** `string` - A JSON string containing the derived `private_key_hex` and `public_key_hex`.
+  - `key_type`: `string` - The desired key type. Use `"ed25519"` for EdDSA or any other string for the default (ECDSA).
+- **Output:** `string` - A JSON string containing the derived `private_key_hex`, `public_key_hex`, and `aes_key_hex`.
 
 #### `sign_challenge(private_key_hex: string, challenge: string)`
-Signs a server-provided UUID challenge string for authentication. The function hashes the UUID bytes with Keccak-256 and signs the digest.
+Signs a server-provided UUID challenge for authentication. **Note:** This is a legacy function that defaults to `sign_challenge_ecdsa`.
 
 - **Inputs:**
   - `private_key_hex`: `string` - The user's private key.
   - `challenge`: `string` - The UUID string received from the server.
 - **Output:** `string` - The DER-encoded ECDSA signature, returned as a hex string.
 
+#### `sign_challenge_ecdsa(private_key_hex: string, challenge: string)`
+Signs a UUID challenge using ECDSA. The function hashes the UUID bytes with Keccak-256 and signs the digest.
+
+- **Inputs:**
+  - `private_key_hex`: `string` - The user's secp256k1 private key.
+  - `challenge`: `string` - The UUID string.
+- **Output:** `string` - The DER-encoded ECDSA signature, hex-encoded.
+
+#### `sign_challenge_eddsa(private_key_hex: string, challenge: string)`
+Signs a UUID challenge using EdDSA. The function hashes the UUID bytes with Keccak-256 and signs the digest.
+
+- **Inputs:**
+  - `private_key_hex`: `string` - The user's Ed25519 private key.
+  - `challenge`: `string` - The UUID string.
+- **Output:** `string` - The compressed EdDSA signature, hex-encoded.
+
 #### `sign_message(private_key_hex: string, message_hex: string)`
-Signs an arbitrary message hash. The function hashes the message bytes with Keccak-256 and signs the digest.
+Signs an arbitrary message hash. **Note:** This is a legacy function that defaults to `sign_message_ecdsa`.
 
 - **Inputs:**
   - `private_key_hex`: `string` - The user's private key.
   - `message_hex`: `string` - The message to sign, hex-encoded.
 - **Output:** `string` - The DER-encoded ECDSA signature, returned as a hex string.
+
+#### `sign_message_ecdsa(private_key_hex: string, message_hex: string)`
+Signs a message using ECDSA. The function hashes the message bytes with Keccak-256 and signs the digest.
+
+- **Inputs:**
+  - `private_key_hex`: `string` - The user's secp256k1 private key.
+  - `message_hex`: `string` - The message to sign, hex-encoded.
+- **Output:** `string` - The DER-encoded ECDSA signature, hex-encoded.
+
+#### `sign_message_eddsa(private_key_hex: string, message_hex: string)`
+Signs a message using EdDSA. The function hashes the message bytes with Keccak-256 and signs the digest.
+
+- **Inputs:**
+  - `private_key_hex`: `string` - The user's Ed25519 private key.
+  - `message_hex`: `string` - The message to sign, hex-encoded.
+- **Output:** `string` - The compressed EdDSA signature, hex-encoded.
 
 #### `get_identifier_hex(id: number)`
 Converts a numeric user ID into a FROST identifier.
@@ -147,7 +195,7 @@ Performs the second DKG step, generating encrypted shares for other participants
   - `secret_package_hex`: The secret data for the final round.
   - `outgoing_packages`: A `Map<string, string>` of recipient `identifier_hex` to their encrypted Round 2 package.
 
-#### `dkg_part3(secret_package_hex: string, round1_packages_hex: JsValue, round2_packages_hex: JsValue, group_id: string, roster_js: JsValue)`
+#### `dkg_part3(secret_package_hex: string, round1_packages_hex: JsValue, round2_packages_hex: JsValue, group_id: string, roster_js: JsValue, key_type: string)`
 Performs the final DKG step, processing shares to compute the participant's long-lived secret key share and the group's public key.
 
 - **Inputs:**
@@ -156,6 +204,7 @@ Performs the final DKG step, processing shares to compute the participant's long
   - `round2_packages_hex`: `JsValue` - The participant's received Round 2 packages.
   - `group_id`: `string` - A unique identifier for the key group.
   - `roster_js`: `JsValue` - A `Map<number, string>` of `uid` to `public_key_hex`.
+  - `key_type`: `string` - The key type of the roster, e.g., `"ecdsa"` or `"eddsa"`.
 - **Output:** `string` - A JSON string containing:
   - `key_package_hex`: The final, persistent key package containing the user's secret share and metadata.
   - `group_public_key_hex`: The group's aggregated public key.
@@ -169,7 +218,7 @@ Extracts and returns metadata from a key package created during DKG.
 
 - **Inputs:**
   - `key_package_hex`: `string` - The key package from `dkg_part3`.
-- **Output:** `string` - A JSON string containing `group_id`, `threshold`, `roster`, and `group_public_key`.
+- **Output:** `string` - A JSON string containing `group_id`, `threshold`, `roster`, `roster_key_type`, and `group_public_key`.
 
 #### `get_signing_prerequisites(key_package_hex: string)`
 Extracts the necessary identifiers from a key package required to join a signing session.
@@ -200,25 +249,70 @@ Performs the second and final step of signing, generating a signature share.
 
 ---
 
+### Share Encryption/Decryption
+
+#### `encrypt_share(aes_key_hex: string, share_plaintext_hex: string)`
+Encrypts a secret share using a symmetric AES-256-GCM key.
+
+- **Inputs:**
+  - `aes_key_hex`: `string` - The 32-byte AES key, hex-encoded.
+  - `share_plaintext_hex`: `string` - The secret share data to encrypt, hex-encoded.
+- **Output:** `string` - A JSON string containing the `ciphertext_hex` and `nonce_hex`.
+
+#### `decrypt_share(aes_key_hex: string, encrypted_share_json: string)`
+Decrypts a secret share using a symmetric AES-256-GCM key.
+
+- **Inputs:**
+  - `aes_key_hex`: `string` - The 32-byte AES key, hex-encoded.
+  - `encrypted_share_json`: `string` - A JSON string containing `ciphertext_hex` and `nonce_hex`.
+- **Output:** `string` - The decrypted plaintext share, hex-encoded.
+
+---
+
 ### ECIES Encryption
 
 #### `ecies_encrypt(recipient_pubkey_hex: string, plaintext_hex: string)`
-Encrypts a plaintext for a recipient using Elliptic Curve Integrated Encryption Scheme (ECIES) with AES-256-GCM.
+Encrypts a plaintext using ECIES. **Note:** This is a legacy function that defaults to `ecies_encrypt_ecdsa`.
 
 - **Inputs:**
-  - `recipient_pubkey_hex`: `string` - The recipient's 33-byte compressed public key.
+  - `recipient_pubkey_hex`: `string` - The recipient's public key.
   - `plaintext_hex`: `string` - The data to encrypt, hex-encoded.
-- **Output:** `string` - A JSON string containing:
-  - `ephemeral_public_key_hex`: The ephemeral public key generated for this encryption.
-  - `nonce_hex`: The AES nonce.
-  - `ciphertext_hex`: The final ciphertext.
+- **Output:** `string` - A JSON string containing the encrypted payload.
 
-#### `ecies_decrypt(recipient_private_key_hex: string, ephemeral_public_key_hex: string, nonce_hex: string, ciphertext_hex: string)`
-Decrypts a ciphertext using ECIES.
+#### `ecies_encrypt_ecdsa(recipient_pubkey_hex: string, plaintext_hex: string)`
+Encrypts a plaintext for a secp256k1 recipient using ECIES with AES-256-GCM.
+
+- **Inputs:**
+  - `recipient_pubkey_hex`: `string` - The recipient's 33-byte compressed secp256k1 public key.
+  - `plaintext_hex`: `string` - The data to encrypt, hex-encoded.
+- **Output:** `string` - A JSON string containing `ephemeral_public_key_hex`, `nonce_hex`, and `ciphertext_hex`.
+
+#### `ecies_encrypt_eddsa(recipient_pubkey_hex: string, plaintext_hex: string)`
+Encrypts a plaintext for an Ed25519 recipient using an ECIES-like scheme with AES-256-GCM.
+
+- **Inputs:**
+  - `recipient_pubkey_hex`: `string` - The recipient's 32-byte compressed Ed25519 public key.
+  - `plaintext_hex`: `string` - The data to encrypt, hex-encoded.
+- **Output:** `string` - A JSON string containing `ephemeral_public_key_hex`, `nonce_hex`, and `ciphertext_hex`.
+
+#### `ecies_decrypt(recipient_private_key_hex: string, ...)`
+Decrypts a ciphertext using ECIES. **Note:** This is a legacy function that defaults to `ecies_decrypt_ecdsa`.
 
 - **Inputs:**
   - `recipient_private_key_hex`: `string` - The recipient's private key.
-  - `ephemeral_public_key_hex`: `string` - The ephemeral public key from the encrypted payload.
+  - `ephemeral_public_key_hex`: `string` - The ephemeral public key from the payload.
   - `nonce_hex`: `string` - The nonce from the payload.
   - `ciphertext_hex`: `string` - The ciphertext from the payload.
+- **Output:** `string` - The decrypted plaintext, hex-encoded.
+
+#### `ecies_decrypt_ecdsa(recipient_private_key_hex: string, ...)`
+Decrypts a ciphertext encrypted for a secp256k1 key.
+
+- **Inputs:** (Same as `ecies_decrypt`)
+- **Output:** `string` - The decrypted plaintext, hex-encoded.
+
+#### `ecies_decrypt_eddsa(recipient_private_key_hex: string, ...)`
+Decrypts a ciphertext encrypted for an Ed25519 key.
+
+- **Inputs:** (Same as `ecies_decrypt`)
 - **Output:** `string` - The decrypted plaintext, hex-encoded.
