@@ -117,17 +117,30 @@ run_dkg/
 
 ## Commands Reference
 ### Makefile (local demo)
+Run the full end-to-end demo (DKG + Signing + Verification):
 ```bash
-# 2-of-3 demo to ./run_dkg
-make all out=run_dkg t=2 n=3 gid=mygroup bind=127.0.0.1:9054
-
-# Customize output directory
-make all out=demo1 t=3 n=5 gid=teamA bind=0.0.0.0:9054
+# 2-of-3 demo sending output to ./run_dkg
+make dkg t=2 n=3 gid=my-secp-group KEY_TYPE=secp256k1
+make ws-sign t=2 n=3 out=run_dkg msg="hello ed25519" KEY_TYPE=secp256k1
 ```
+
+Clean up artifacts:
+```bash
+make clean out=run_dkg
+```
+
+#### Parameters
+- `t`: Threshold (min signers)
+- `n`: Total participants
+- `gid`: Group ID string
+- `out`: Output directory (default `run_dkg`)
+- `msg`: Message to sign (string or hex)
+- `bind`: Coordinator host:port (default `127.0.0.1:9034`)
+- `KEY_TYPE`: `secp256k1` or `ed25519` (creates `EdwardsOnBls12381` keys) or `edwards_on_bls12381`
 
 ### Start only the server
 ```bash
-cargo run -p fserver -- server --bind 127.0.0.1:9054
+cargo run -p fserver -- server --bind 127.0.0.1:9034
 ```
 
 ### Run creator/participants manually (example)

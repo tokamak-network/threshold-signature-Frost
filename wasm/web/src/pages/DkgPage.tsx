@@ -300,8 +300,8 @@ function DkgPage() {
                 log('info', `Generating new random ${keyType} keys...`);
                 // Generate keys based on current keyType selection
                 const keys = generateRandomKeys(keyType);
-                setPrivateKey(keys.private_key_hex);
-                setPublicKey(keys.public_key_hex);
+                setPrivateKey(keys.private);
+                setPublicKey(keys.public);
                 setAesKey(''); // No AES key for random generation
                 toast.success(`New random ${keyType} key pair generated.`);
             }

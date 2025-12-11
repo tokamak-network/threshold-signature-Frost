@@ -4269,6 +4269,7 @@ dependencies = [
  "frost-core",
  "frost-secp256k1",
  "getrandom 0.2.16",
+ "helper",
  "hex",
  "k256",
  "rand",
