@@ -21,7 +21,7 @@ The server communicates via JSON messages over WebSocket.
 
 -   **`hex`**: Hexadecimal string representation of binary data (e.g., `"a1b2..."`).
 -   **`bincode_hex`**: Binary data serialized with `bincode` (Rust) and then hex-encoded.
--   **`RosterPublicKey`**: JSON object `{ "type": "Secp256k1" | "Ed25519", "key": "HEX_STRING" }`.
+-   **`RosterPublicKey`**: JSON object `{ "type": "Secp256k1" | "EdwardsOnBls12381", "key": "HEX_STRING" }`.
 
 ---
 

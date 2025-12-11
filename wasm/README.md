@@ -2,7 +2,7 @@
 
 This directory contains the core cryptographic library for the Tokamak-FROST client, compiled to WebAssembly (WASM). It exposes a suite of functions to JavaScript, enabling web applications to perform complex cryptographic operations for Distributed Key Generation (DKG) and interactive threshold signing using the FROST protocol.
 
-The library handles both ECDSA (secp256k1) and EdDSA (Ed25519) key management, message signing, ECIES encryption/decryption, and the multi-round protocols required for FROST.
+The library handles both ECDSA (secp256k1) and EdDSA (EdwardsOnBls12381) key management, message signing, ECIES encryption/decryption, and the multi-round protocols required for FROST.
 
 ## How to Build
 
@@ -79,7 +79,7 @@ Generates a new random secp256k1 (ECDSA) key pair.
   - `public_key_hex`: The 33-byte compressed public key, hex-encoded.
 
 #### `generate_eddsa_keypair()`
-Generates a new random Ed25519 (EdDSA) key pair.
+Generates a new random EdwardsOnBls12381 (EdDSA) key pair.
 
 - **Inputs:** None
 - **Output:** `string` - A JSON string containing:
@@ -91,7 +91,7 @@ Deterministically derives a key pair (ECDSA or EdDSA) and a symmetric AES key fr
 
 - **Inputs:**
   - `signature_hex`: `string` - An ECDSA signature, hex-encoded.
-  - `key_type`: `string` - The desired key type. Use `"ed25519"` for EdDSA or any other string for the default (ECDSA).
+  - `key_type`: `string` - The desired key type. Use `"edwards_on_bls12381"` for EdDSA or any other string for the default (ECDSA).
 - **Output:** `string` - A JSON string containing the derived `private_key_hex`, `public_key_hex`, and `aes_key_hex`.
 
 #### `sign_challenge(private_key_hex: string, challenge: string)`
@@ -114,7 +114,7 @@ Signs a UUID challenge using ECDSA. The function hashes the UUID bytes with Kecc
 Signs a UUID challenge using EdDSA. The function hashes the UUID bytes with Keccak-256 and signs the digest.
 
 - **Inputs:**
-  - `private_key_hex`: `string` - The user's Ed25519 private key.
+  - `private_key_hex`: `string` - The user's EdwardsOnBls12381 private key.
   - `challenge`: `string` - The UUID string.
 - **Output:** `string` - The compressed EdDSA signature, hex-encoded.
 
@@ -138,7 +138,7 @@ Signs a message using ECDSA. The function hashes the message bytes with Keccak-2
 Signs a message using EdDSA. The function hashes the message bytes with Keccak-256 and signs the digest.
 
 - **Inputs:**
-  - `private_key_hex`: `string` - The user's Ed25519 private key.
+  - `private_key_hex`: `string` - The user's EdwardsOnBls12381 private key.
   - `message_hex`: `string` - The message to sign, hex-encoded.
 - **Output:** `string` - The compressed EdDSA signature, hex-encoded.
 
@@ -288,10 +288,10 @@ Encrypts a plaintext for a secp256k1 recipient using ECIES with AES-256-GCM.
 - **Output:** `string` - A JSON string containing `ephemeral_public_key_hex`, `nonce_hex`, and `ciphertext_hex`.
 
 #### `ecies_encrypt_eddsa(recipient_pubkey_hex: string, plaintext_hex: string)`
-Encrypts a plaintext for an Ed25519 recipient using an ECIES-like scheme with AES-256-GCM.
+Encrypts a plaintext for an EdwardsOnBls12381 recipient using an ECIES-like scheme with AES-256-GCM.
 
 - **Inputs:**
-  - `recipient_pubkey_hex`: `string` - The recipient's 32-byte compressed Ed25519 public key.
+  - `recipient_pubkey_hex`: `string` - The recipient's 32-byte compressed EdwardsOnBls12381 public key.
   - `plaintext_hex`: `string` - The data to encrypt, hex-encoded.
 - **Output:** `string` - A JSON string containing `ephemeral_public_key_hex`, `nonce_hex`, and `ciphertext_hex`.
 
@@ -312,7 +312,7 @@ Decrypts a ciphertext encrypted for a secp256k1 key.
 - **Output:** `string` - The decrypted plaintext, hex-encoded.
 
 #### `ecies_decrypt_eddsa(recipient_private_key_hex: string, ...)`
-Decrypts a ciphertext encrypted for an Ed25519 key.
+Decrypts a ciphertext encrypted for an EdwardsOnBls12381 key.
 
 - **Inputs:** (Same as `ecies_decrypt`)
 - **Output:** `string` - The decrypted plaintext, hex-encoded.

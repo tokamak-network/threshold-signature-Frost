@@ -18,12 +18,12 @@ fn main() {
         rng.fill_bytes(&mut sk_bytes);
 
         // Use helper's RosterSigningKey to ensure compatibility
-        let sk = RosterSigningKey::Ed25519(sk_bytes);
+        let sk = RosterSigningKey::EdwardsOnBls12381(sk_bytes);
         let pk = sk.public_key();
 
         let pk_hex = match pk {
-            RosterPublicKey::Ed25519(h) => h,
-            _ => panic!("Expected Ed25519 key"),
+            RosterPublicKey::EdwardsOnBls12381(h) => h,
+            _ => panic!("Expected EdwardsOnBls12381 key"),
         };
 
         println!("{} {}", hex::encode(sk_bytes), pk_hex);

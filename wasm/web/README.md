@@ -4,7 +4,7 @@ This directory contains the source code for the React-based web client that inte
 
 ## Features
 
--   **Multi-Curve Support**: Supports both **Secp256k1** (Ethereum/FROST) and **Ed25519** (Solana/ZCash) elliptic curves.
+-   **Multi-Curve Support**: Supports both **Secp256k1** (Ethereum/FROST) and **EdwardsOnBls12381** (Edwards on BLS12-381) elliptic curves.
 -   **Deterministic Key Derivation**: Derives consistent Roster and AES keys directly from a MetaMask wallet signature, ensuring users don't need to manage separate backup files for their identities.
 -   **Secure Key Storage**: Detailed DKG secret shares are encrypted at rest using AES-256-GCM derived from the user's wallet.
 -   **Interactive Ceremonies**: Real-time WebSocket communication for multi-party DKG and Signing sessions.
@@ -24,7 +24,7 @@ In the project directory, you can run:
 The client supports two modes for the **Roster KeyKeyPair** (the key used to identify the participant and sign messages):
 
 1.  **Secp256k1**: Standard for Bitcoin and Ethereum. Used for standard FROST operations.
-2.  **Ed25519**: Standard for Solana and Cosmos.
+2.  **EdwardsOnBls12381**: Edwards curve on BLS12-381.
 
 **Note**: The choice of key type also determines the structure of the keys generated during DKG.
 
@@ -44,7 +44,7 @@ The DKG ceremony generates a shared group secret distributed among participants.
     *   **Structure**:
         ```json
         {
-          "key_type": "secp256k1", // or "ed25519"
+          "key_type": "secp256k1", // or "edwards_on_bls12381"
           "finalShare": { "ciphertext_hex": "...", "nonce_hex": "..." },
           "finalGroupKey": "..."
         }
@@ -56,7 +56,7 @@ The signing ceremony uses the DKG credentials to sign a message as a group.
 
 1.  **Upload Key File**:
     *   Users just upload their `frost-key-....json` file.
-    *   The application **automatically detects** the Key Type (Secp256k1 or Ed25519) from the file.
+    *   The application **automatically detects** the Key Type (Secp256k1 or EdwardsOnBls12381) from the file.
 2.  **Derive Roster Key**:
     *   The user clicks "Derive Roster Key".
     *   They sign a message with MetaMask to regenerate their AES Key and Roster Key.
@@ -72,8 +72,9 @@ To eliminate the need for storing unsecured private keys, we derive them *determ
 
 ### Protocol Specification
 
-The keys are derived from a signature of the static message:  
-`M = "Tokamak-Frost-Seed V1"`
+The keys are derived from a signature of the message:  
+`M = "Tokamak-Frost-Seed V1 with salt of {salt}"`
+where `{salt}` is a user-supplied numeric value (default "2026").
 
 #### 1. Entropy Generation
 User signs `M` using their Ethereum wallet (Secp256k1):
@@ -98,9 +99,9 @@ The specific derivation depends on the chosen curve:
 -   **Secp256k1 (FROST/ETH)**:
     -   `Seed = Keccak256(H1)`
     -   `Private_Key = Secp256k1_Scalar(Seed)`
--   **Ed25519 (Solana/ZCash)**:
+-   **EdwardsOnBls12381**:
     -   `Seed = Keccak256(H1)`
-    -   `Private_Key = Ed25519_Scalar(Seed)` (Using `EdDSAPrivateKey::from_bytes`)
+    -   `Private_Key = EdwardsOnBls12381_Scalar(Seed)` (Using `EdDSAPrivateKey::from_bytes`)
 
 **B. AES Key (Encryption)**
 Used to encrypt/decrypt the DKG secret share.
