@@ -127,7 +127,7 @@ pub fn derive_keys_from_signature(signature_hex: &str, key_type: &str) -> Result
     keccak_hasher_aes.update(second_32);
     let aes_key_bytes = keccak_hasher_aes.finalize();
 
-    if key_type == "ed25519" {
+    if key_type == "edwards_on_bls12381" {
         let mut sk_bytes = [0u8; 32];
         sk_bytes.copy_from_slice(&private_key_bytes);
         let sk = EdDSAPrivateKey::from_bytes(sk_bytes);

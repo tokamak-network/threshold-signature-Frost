@@ -220,11 +220,12 @@ function SigningPage() {
     const [port, setPort] = useState('9034');
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
-    const [keyType, setKeyType] = useState<'secp256k1' | 'ed25519'>('ed25519');
+    const [keyType, setKeyType] = useState<'secp256k1' | 'edwards_on_bls12381'>('edwards_on_bls12381');
     const [aesKey, setAesKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [keyPackage, setKeyPackage] = useState('');
     const [mySuid, setMySuid] = useState<number | null>(null);
+    const [salt, setSalt] = useState('2026'); // Default salt or from file
 
     // --- State for Signing Ceremony ---
     const [isCreator, setIsCreator] = useState(false);
@@ -278,7 +279,7 @@ function SigningPage() {
                 setThreshold(metadata.threshold.toString());
                 setGroupVk(metadata.group_public_key);
                 if (metadata.roster_key_type) {
-                    setKeyType(metadata.roster_key_type === 'ed25519' ? 'ed25519' : 'secp256k1');
+                    setKeyType(metadata.roster_key_type === 'edwards_on_bls12381' ? 'edwards_on_bls12381' : 'secp256k1');
                 }
                 const pubkeys = Object.values(metadata.roster) as string[];
                 if (!pubkeys.includes(publicKey)) {
@@ -368,7 +369,7 @@ function SigningPage() {
             let keys;
             if (isMetaMaskConnected) {
                 log('info', `Deriving ${keyType} keys from MetaMask signature...`);
-                keys = await deriveKeysFromMetaMask(signMessageAsync, keyType);
+                keys = await deriveKeysFromMetaMask(signMessageAsync, keyType, salt);
                 toast.success(`Roster and AES keys derived from MetaMask signature (${keyType}).`);
             } else {
                 log('info', `Generating new random ${keyType} keys...`);
@@ -448,13 +449,17 @@ function SigningPage() {
 
                     // --- Extract other metadata for display ---
                     if (jsonData.key_type) {
-                        setKeyType(jsonData.key_type === 'ed25519' ? 'ed25519' : 'secp256k1');
+                        setKeyType(jsonData.key_type === 'edwards_on_bls12381' ? 'edwards_on_bls12381' : 'secp256k1');
                         log('info', `Detected Key Type (from file header): ${jsonData.key_type}`);
                     }
                     if (jsonData.finalGroupKeyCompressed) {
                         setGroupVk(jsonData.finalGroupKeyCompressed);
                     } else if (jsonData.finalGroupKey) {
                         setGroupVk(jsonData.finalGroupKey);
+                    }
+                    if (jsonData.salt) {
+                        setSalt(jsonData.salt);
+                        log('info', `Loaded Salt from file: ${jsonData.salt}`);
                     }
 
                     log('info', 'Successfully loaded frost-key.json. Please derive/generate keys to decrypt if necessary.');
@@ -548,7 +553,7 @@ function SigningPage() {
             let keyObj;
             const cleanKey = pubkey.trim();
             if (cleanKey.length === 64) {
-                keyObj = { type: 'Ed25519', key: cleanKey };
+                keyObj = { type: 'EdwardsOnBls12381', key: cleanKey };
             } else {
                 keyObj = { type: 'Secp256k1', key: cleanKey };
             }
@@ -672,7 +677,7 @@ function SigningPage() {
                             <label className="switch">
                                 <input
                                     type="checkbox"
-                                    checked={keyType === 'ed25519'}
+                                    checked={keyType === 'edwards_on_bls12381'}
                                     onChange={() => { }} // It's disabled, so this won't be called.
                                     disabled={true}
                                 />
@@ -701,6 +706,16 @@ function SigningPage() {
                     <button onClick={handleKeyGeneration} disabled={isServerConnected || !keyPackage} className={isMetaMaskConnected ? 'metamask-button' : 'generate-button'}>
                         {isMetaMaskConnected ? 'Derive Roster Key' : 'Generate New Random Keys'}
                     </button>
+                    <div className="form-group" style={{ marginTop: '10px' }}>
+                        <label>Key Derivation Salt</label>
+                        <input
+                            type="number"
+                            value={salt}
+                            onChange={e => setSalt(e.target.value)}
+                            disabled={true} // Read-only in Signing Page as it should come from file or stay default
+                        />
+                        <small style={{ color: '#aaa' }}>Loaded from key file</small>
+                    </div>
                     <hr />
                     <div className="form-group">
                         <label>F-Server IP:Port</label>

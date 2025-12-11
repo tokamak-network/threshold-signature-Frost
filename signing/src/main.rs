@@ -132,7 +132,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Roster key type for this client [secp256k1 | ed25519]
+    /// Roster key type for this client [secp256k1 | edwards_on_bls12381]
     #[arg(long, global = true, env = "ROSTER_KEY_TYPE")]
     key_type: Option<String>,
 
@@ -372,10 +372,10 @@ async fn main() -> Result<()> {
                     let sk = k256::ecdsa::SigningKey::from_bytes(fb)?;
                     RosterSigningKey::Secp256k1(sk)
                 }
-                "ed25519" => {
+                "edwards_on_bls12381" => {
                     let mut sk_bytes = [0u8; 32];
                     sk_bytes.copy_from_slice(&bytes);
-                    RosterSigningKey::Ed25519(sk_bytes)
+                    RosterSigningKey::EdwardsOnBls12381(sk_bytes)
                 }
                 _ => return Err(anyhow!("Unsupported key-type: {}", ty)),
             };

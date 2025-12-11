@@ -184,10 +184,11 @@ function DkgPage() {
     const [port, setPort] = useState('9034');
     const [privateKey, setPrivateKey] = useState('');
     const [publicKey, setPublicKey] = useState('');
-    const [keyType, setKeyType] = useState<'secp256k1' | 'ed25519'>('ed25519');
+    const [keyType, setKeyType] = useState<'secp256k1' | 'edwards_on_bls12381'>('edwards_on_bls12381');
     const [aesKey, setAesKey] = useState('');
     const [isServerConnected, setIsServerConnected] = useState(false);
     const [mySuid, setMySuid] = useState<number | null>(null);
+    const [salt, setSalt] = useState('2026'); // Default salt
 
     // --- State for DKG Ceremony ---
     const [isCreator, setIsCreator] = useState(false);
@@ -283,12 +284,12 @@ function DkgPage() {
         try {
             if (isMetaMaskConnected) {
                 // If Secp256k1 is selected, we derive for Roster key
-                // If Ed25519 is selected, the user might want a derived Ed25519 key (deterministic from MM)
+                // If EdwardsOnBls12381 is selected, the user might want a derived EdwardsOnBls12381 key (deterministic from MM)
                 // The previous logic forced Secp256k1, but now we allow both.
 
                 log('info', `Deriving ${keyType} keys from MetaMask signature...`);
                 // Pass keyType to derivation function
-                const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync, keyType);
+                const derivedKeys = await deriveKeysFromMetaMask(signMessageAsync, keyType, salt);
 
                 setPrivateKey(derivedKeys.private_key_hex);
                 setPublicKey(derivedKeys.public_key_hex);
@@ -420,7 +421,7 @@ function DkgPage() {
             let keyObj;
             const cleanKey = pubkey.trim();
             if (cleanKey.length === 64) {
-                keyObj = { type: 'Ed25519', key: cleanKey };
+                keyObj = { type: 'EdwardsOnBls12381', key: cleanKey };
             } else {
                 keyObj = { type: 'Secp256k1', key: cleanKey };
             }
@@ -487,16 +488,18 @@ function DkgPage() {
         }
 
         const keyData: {
-            key_type: 'secp256k1' | 'ed25519';
+            key_type: 'secp256k1' | 'edwards_on_bls12381';
             encryptedKeyPackageHex: string; // This will be the bincode-hex of the encrypted KeyPackageWithMetadata
             finalGroupKeyCompressed: string;
             finalGroupKeyUncompressed?: string; // Optional field
             px?: string;
             py?: string;
+            salt?: string;
         } = {
             key_type: keyType,
             encryptedKeyPackageHex: finalShare, // finalShare now holds the encrypted bincode-hex
             finalGroupKeyCompressed: finalGroupKey,
+            salt: salt, // Persist salt to file
         };
 
         if (finalGroupKeyUncompressed) {
@@ -615,8 +618,8 @@ function DkgPage() {
                             <label className="switch">
                                 <input
                                     type="checkbox"
-                                    checked={keyType === 'ed25519'}
-                                    onChange={() => setKeyType(keyType === 'ed25519' ? 'secp256k1' : 'ed25519')}
+                                    checked={keyType === 'edwards_on_bls12381'}
+                                    onChange={() => setKeyType(keyType === 'edwards_on_bls12381' ? 'secp256k1' : 'edwards_on_bls12381')}
                                     disabled={isServerConnected}
                                 />
                                 <span className="slider round"></span>
@@ -640,6 +643,16 @@ function DkgPage() {
                     >
                         {isMetaMaskConnected ? 'Derive Roster Key' : 'Generate New Random Keys'}
                     </button>
+                    <div className="form-group" style={{ marginTop: '10px' }}>
+                        <label>Key Derivation Salt (Max 64-bit number)</label>
+                        <input
+                            type="number"
+                            value={salt}
+                            onChange={e => setSalt(e.target.value)}
+                            disabled={isServerConnected}
+                            placeholder="e.g. 2026"
+                        />
+                    </div>
                     <hr />
                     <div className="form-group">
                         <label>F-Server IP:Port</label>

@@ -32,7 +32,7 @@ use std::env;
 #[serde(tag = "type", content = "key")]
 pub enum RosterPublicKey {
     Secp256k1(String), // Compressed SEC1 hex string
-    Ed25519(String),   // Compressed hex string
+    EdwardsOnBls12381(String),   // Compressed hex string
 }
 
 impl RosterPublicKey {
@@ -41,10 +41,10 @@ impl RosterPublicKey {
         RosterPublicKey::Secp256k1(hex::encode(vk.to_encoded_point(true).as_bytes()))
     }
 
-    /// Creates an Ed25519 RosterPublicKey from an EdDSAPublicKey.
-    pub fn from_ed25519_pk(pk: &eddsa::EdDSAPublicKey) -> anyhow::Result<Self> {
+    /// Creates an EdwardsOnBls12381 RosterPublicKey from an EdDSAPublicKey.
+    pub fn from_edwards_on_bls12381_pk(pk: &eddsa::EdDSAPublicKey) -> anyhow::Result<Self> {
         let pk_bytes = pk.to_compressed_bytes().unwrap();
-        Ok(RosterPublicKey::Ed25519(hex::encode(pk_bytes)))
+        Ok(RosterPublicKey::EdwardsOnBls12381(hex::encode(pk_bytes)))
     }
 
     /// Verifies a signature against a payload.
@@ -58,7 +58,7 @@ impl RosterPublicKey {
                 vk.verify_digest(Keccak256::new().chain_update(payload), &sig)
                     .map_err(|_| anyhow!("ECDSA signature verification failed"))
             }
-            RosterPublicKey::Ed25519(pk_hex) => {
+            RosterPublicKey::EdwardsOnBls12381(pk_hex) => {
                 let pk_bytes = hex::decode(pk_hex)?;
                 let pk = eddsa::EdDSAPublicKey::from_compressed_bytes(pk_bytes.as_slice()).unwrap();
                 let sig = parse_eddsa_sig_hex(signature_hex)?;
@@ -90,7 +90,7 @@ impl RosterPublicKey {
                     ciphertext: hex::encode(ct),
                 })
             }
-            RosterPublicKey::Ed25519(pk_hex) => {
+            RosterPublicKey::EdwardsOnBls12381(pk_hex) => {
                 let pk_bytes = hex::decode(pk_hex)?;
                 let (eph_pub_bytes, encrypted_msg) =
                     encrypt_with_edwards_curve(&pk_bytes, plaintext);
@@ -100,7 +100,7 @@ impl RosterPublicKey {
                 let nonce = &encrypted_msg[0..12];
                 let ciphertext = &encrypted_msg[12..];
                 Ok(EncryptedPayload {
-                    ephemeral_public_key: RosterPublicKey::Ed25519(hex::encode(eph_pub_bytes)),
+                    ephemeral_public_key: RosterPublicKey::EdwardsOnBls12381(hex::encode(eph_pub_bytes)),
                     nonce: hex::encode(nonce),
                     ciphertext: hex::encode(ciphertext),
                 })
@@ -113,7 +113,7 @@ impl RosterPublicKey {
 #[derive(Debug)]
 pub enum RosterSigningKey {
     Secp256k1(EcdsaSigningKey),
-    Ed25519([u8; 32]),
+    EdwardsOnBls12381([u8; 32]),
 }
 
 impl RosterSigningKey {
@@ -123,9 +123,9 @@ impl RosterSigningKey {
             RosterSigningKey::Secp256k1(sk) => {
                 RosterPublicKey::from_secp256k1_vk(sk.verifying_key())
             }
-            RosterSigningKey::Ed25519(sk_bytes) => {
+            RosterSigningKey::EdwardsOnBls12381(sk_bytes) => {
                 let sk = eddsa::EdDSAPrivateKey::from_bytes(*sk_bytes);
-                RosterPublicKey::from_ed25519_pk(&sk.public())
+                RosterPublicKey::from_edwards_on_bls12381_pk(&sk.public())
                     .expect("EdDSA public key derivation failed")
             }
         }
@@ -139,7 +139,7 @@ impl RosterSigningKey {
                 let sig: EcdsaSignature = sk.sign_digest(Keccak256::new().chain_update(payload));
                 hex::encode(sig.to_der().as_bytes())
             }
-            RosterSigningKey::Ed25519(sk_bytes) => {
+            RosterSigningKey::EdwardsOnBls12381(sk_bytes) => {
                 let sk = eddsa::EdDSAPrivateKey::from_bytes(*sk_bytes);
                 let message = Keccak256::digest(payload).to_vec();
                 let sig = sk.sign_bytes(message.as_slice());
@@ -166,7 +166,7 @@ impl RosterSigningKey {
                     &ciphertext_bytes,
                 )
             }
-            (RosterSigningKey::Ed25519(sk_bytes), RosterPublicKey::Ed25519(eph_pub_hex)) => {
+            (RosterSigningKey::EdwardsOnBls12381(sk_bytes), RosterPublicKey::EdwardsOnBls12381(eph_pub_hex)) => {
                 let eph_pub_bytes = hex::decode(eph_pub_hex)?;
                 let nonce_bytes = hex::decode(&encrypted_payload.nonce)?;
                 let ciphertext_bytes = hex::decode(&encrypted_payload.ciphertext)?;
@@ -576,10 +576,10 @@ pub fn read_roster_signing_key_from_env() -> anyhow::Result<Option<RosterSigning
                         .map_err(|_| anyhow!("invalid secp256k1 private key bytes"))?;
                     RosterSigningKey::Secp256k1(sk)
                 }
-                "ed25519" => {
+                "edwards_on_bls12381" => {
                     let mut sk_bytes = [0u8; 32];
                     sk_bytes.copy_from_slice(&bytes);
-                    RosterSigningKey::Ed25519(sk_bytes)
+                    RosterSigningKey::EdwardsOnBls12381(sk_bytes)
                 }
                 _ => return Err(anyhow!("Unsupported ROSTER_KEY_TYPE: {}", ty)),
             };
@@ -610,18 +610,18 @@ mod tests {
     }
 
     #[test]
-    fn test_roster_key_ed25519_sign_verify() {
+    fn test_roster_key_edwards_on_bls12381_sign_verify() {
         let mut rng = thread_rng();
         let sk_bytes: [u8; 32] = rng.gen();
-        let roster_sk = RosterSigningKey::Ed25519(sk_bytes);
+        let roster_sk = RosterSigningKey::EdwardsOnBls12381(sk_bytes);
         let pk_eddsa = roster_sk.public_key();
 
-        let payload = b"test message for ed25519";
+        let payload = b"test message for edwards_on_bls12381";
         let signature_hex = roster_sk.sign(payload);
 
         pk_eddsa
             .verify(payload, &signature_hex)
-            .expect("Ed25519 verification failed");
+            .expect("EdwardsOnBls12381 verification failed");
     }
 
     #[test]
@@ -639,13 +639,13 @@ mod tests {
     }
 
     #[test]
-    fn test_roster_key_ed25519_ecies_encrypt_decrypt() {
+    fn test_roster_key_edwards_on_bls12381_ecies_encrypt_decrypt() {
         let mut rng = thread_rng();
         let sk_bytes: [u8; 32] = rng.gen();
-        let roster_sk = RosterSigningKey::Ed25519(sk_bytes);
+        let roster_sk = RosterSigningKey::EdwardsOnBls12381(sk_bytes);
         let pk_eddsa = roster_sk.public_key();
 
-        let plaintext = b"secret message for ed25519";
+        let plaintext = b"secret message for edwards_on_bls12381";
         let mut os_rng = OsRng;
         let encrypted_payload = pk_eddsa.encrypt_for(plaintext, &mut os_rng).unwrap();
         let decrypted = roster_sk.decrypt_with(&encrypted_payload).unwrap();
@@ -662,7 +662,7 @@ mod tests {
 
         let mut thread_rng = thread_rng();
         let sk_bytes_eddsa: [u8; 32] = thread_rng.gen();
-        let roster_sk_eddsa = RosterSigningKey::Ed25519(sk_bytes_eddsa);
+        let roster_sk_eddsa = RosterSigningKey::EdwardsOnBls12381(sk_bytes_eddsa);
         let pk_eddsa = roster_sk_eddsa.public_key();
 
         let plaintext = b"secret message";
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_group_vk1_to_uncompressed_ed25519() {
+    fn test_convert_group_vk1_to_uncompressed_edwards_on_bls12381() {
         let mut rng = thread_rng();
 
          let max_signers = 5;

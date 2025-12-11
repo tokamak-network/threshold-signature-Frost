@@ -28,19 +28,20 @@ import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGS
 // region: Key Management
 // ====================================================================
 
-export const generateRandomKeys = (keyType: 'secp256k1' | 'ed25519') => {
-    if (keyType === 'ed25519') {
-        const keys = JSON.parse(generate_eddsa_keypair());
-        keys.key_type = 'ed25519';
+export const generateRandomKeys = (keyType: 'secp256k1' | 'edwards_on_bls12381') => {
+    let keys: { private: string; public: string, key_type?: string } = { private: '', public: '' };
+    if (keyType === 'edwards_on_bls12381') {
+        // Use helper to generate edwards_on_bls12381 key
+        keys.key_type = 'edwards_on_bls12381';
         return keys;
     }
-    const keys = JSON.parse(generate_ecdsa_keypair());
-    keys.key_type = 'secp256k1';
-    return keys;
+    const ecdsaKeys = JSON.parse(generate_ecdsa_keypair());
+    ecdsaKeys.key_type = 'secp256k1';
+    return ecdsaKeys;
 };
 
-export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>, targetKeyType: 'secp256k1' | 'ed25519') => {
-    const messageToSign = "Tokamak-Frost-Seed V1";
+export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>, targetKeyType: 'secp256k1' | 'edwards_on_bls12381', salt: string) => {
+    const messageToSign = `Tokamak-Frost-Seed V1 with salt of ${salt}`;
     const signature = await signMessageAsync({ message: messageToSign });
     const keys = JSON.parse(derive_keys_from_signature(signature, targetKeyType));
     keys.key_type = targetKeyType;
@@ -51,15 +52,15 @@ export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message:
 // region: Crypto Wrappers
 // ====================================================================
 
-export const signChallenge = (privateKeyHex: string, challenge: string, keyType: 'secp256k1' | 'ed25519') => {
-    if (keyType === 'ed25519') {
+export const signChallenge = (privateKeyHex: string, challenge: string, keyType: 'secp256k1' | 'edwards_on_bls12381') => {
+    if (keyType === 'edwards_on_bls12381') {
         return sign_challenge_eddsa(privateKeyHex, challenge);
     }
     return sign_challenge_ecdsa(privateKeyHex, challenge);
 }
 
-export const signMessage = (privateKeyHex: string, messageHex: string, keyType: 'secp256k1' | 'ed25519') => {
-    if (keyType === 'ed25519') {
+export const signMessage = (privateKeyHex: string, messageHex: string, keyType: 'secp256k1' | 'edwards_on_bls12381') => {
+    if (keyType === 'edwards_on_bls12381') {
         return sign_message_eddsa(privateKeyHex, messageHex);
     }
     return sign_message_ecdsa(privateKeyHex, messageHex);
@@ -75,8 +76,8 @@ export const eciesEncrypt = (recipientKeyHex: string, plaintextHex: string) => {
     return ecies_encrypt_ecdsa(recipientKeyHex, plaintextHex);
 }
 
-export const eciesDecrypt = (privateKeyHex: string, ephPubHex: string, nonceHex: string, ctHex: string, keyType: 'secp256k1' | 'ed25519') => {
-    if (keyType === 'ed25519') {
+export const eciesDecrypt = (privateKeyHex: string, ephPubHex: string, nonceHex: string, ctHex: string, keyType: 'secp256k1' | 'edwards_on_bls12381') => {
+    if (keyType === 'edwards_on_bls12381') {
         return ecies_decrypt_eddsa(privateKeyHex, ephPubHex, nonceHex, ctHex);
     }
     return ecies_decrypt_ecdsa(privateKeyHex, ephPubHex, nonceHex, ctHex);
@@ -119,7 +120,7 @@ interface DkgStateSetters {
 
 export const handleServerMessage = async (
     msg: any,
-    state: { privateKey: string, publicKey: string, keyType: 'secp256k1' | 'ed25519', isCreator: boolean, dkgState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
+    state: { privateKey: string, publicKey: string, keyType: 'secp256k1' | 'edwards_on_bls12381', isCreator: boolean, dkgState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
     setters: DkgStateSetters,
     log: (level: LogEntry['level'], message: string) => void,
     ws: React.MutableRefObject<WebSocket | null>
@@ -177,8 +178,8 @@ export const handleServerMessage = async (
                 log('info', 'Challenge signed. Sending login...');
 
                 // Construct RosterPublicKey object
-                const rosterKey = state.keyType === 'ed25519'
-                    ? { type: 'Ed25519', key: state.publicKey }
+                const rosterKey = state.keyType === 'edwards_on_bls12381'
+                    ? { type: 'EdwardsOnBls12381', key: state.publicKey }
                     : { type: 'Secp256k1', key: state.publicKey };
 
                 sendMessage(ws.current, {
@@ -278,7 +279,7 @@ export const handleServerMessage = async (
                     // Construct RosterPublicKey for ephemeral key
                     let ephKeyType = 'Secp256k1';
                     if (ephemeral_public_key_hex.length === 64) {
-                        ephKeyType = 'Ed25519';
+                        ephKeyType = 'EdwardsOnBls12381';
                     } else if (ephemeral_public_key_hex.length === 66) {
                         ephKeyType = 'Secp256k1'; // Fallback / explicit
                     }
@@ -410,7 +411,7 @@ interface SigningStateSetters {
 
 export const handleSigningServerMessage = async (
     msg: any,
-    state: { privateKey: string, publicKey: string, keyPackage: string, keyType: 'secp256k1' | 'ed25519', signingState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
+    state: { privateKey: string, publicKey: string, keyPackage: string, keyType: 'secp256k1' | 'edwards_on_bls12381', signingState: React.MutableRefObject<any>, sessionIdRef: React.MutableRefObject<string> },
     setters: SigningStateSetters,
     log: (level: LogEntry['level'], message: string) => void,
     ws: React.MutableRefObject<WebSocket | null>
@@ -439,8 +440,8 @@ export const handleSigningServerMessage = async (
                 const signature = signChallenge(state.privateKey, msg.payload.challenge, state.keyType);
                 log('info', 'Challenge signed. Sending login...');
 
-                const rosterKey = state.keyType === 'ed25519'
-                    ? { type: 'Ed25519', key: state.publicKey }
+                const rosterKey = state.keyType === 'edwards_on_bls12381'
+                    ? { type: 'EdwardsOnBls12381', key: state.publicKey }
                     : { type: 'Secp256k1', key: state.publicKey };
 
                 sendMessage(ws.current, {

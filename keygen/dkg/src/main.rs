@@ -1,5 +1,5 @@
 /*!
-Tokamak FROST — DKG Client (secp256k1/ed25519)
+Tokamak FROST — DKG Client (secp256k1/edwards_on_bls12381)
 -------------------------------------
 This binary is **client-only**. It connects to a WebSocket coordinator and
 executes the three-round FROST DKG protocol:
@@ -246,10 +246,10 @@ async fn run_client(
                     let sk = k256::ecdsa::SigningKey::from_bytes(fb)?;
                     RosterSigningKey::Secp256k1(sk)
                 }
-                "ed25519" => {
+                "edwards_on_bls12381" => {
                     let mut sk_bytes = [0u8; 32];
                     sk_bytes.copy_from_slice(&bytes);
-                    RosterSigningKey::Ed25519(sk_bytes)
+                    RosterSigningKey::EdwardsOnBls12381(sk_bytes)
                 }
                 _ => return Err(anyhow!("Unsupported key-type: {}", ty)),
             };
@@ -459,7 +459,7 @@ async fn run_client(
                             .ok_or_else(|| anyhow!("no session id yet"))?;
                         let eph_pub_bytes = match &encrypted_payload.ephemeral_public_key {
                             RosterPublicKey::Secp256k1(b) => hex::decode(b)?,
-                            RosterPublicKey::Ed25519(b) => hex::decode(b)?,
+                            RosterPublicKey::EdwardsOnBls12381(b) => hex::decode(b)?,
                         };
                         let nonce_bytes = hex::decode(&encrypted_payload.nonce)?;
                         let ciphertext_bytes = hex::decode(&encrypted_payload.ciphertext)?;
@@ -505,7 +505,7 @@ async fn run_client(
                                 .ok_or_else(|| anyhow!("no session id yet"))?;
                             let eph_pub_bytes = match &encrypted_payload.ephemeral_public_key {
                                 RosterPublicKey::Secp256k1(b) => hex::decode(b)?,
-                                RosterPublicKey::Ed25519(b) => hex::decode(b)?,
+                                RosterPublicKey::EdwardsOnBls12381(b) => hex::decode(b)?,
                             };
                             let nonce_bytes = hex::decode(&encrypted_payload.nonce)?;
                             let ciphertext_bytes = hex::decode(&encrypted_payload.ciphertext)?;
