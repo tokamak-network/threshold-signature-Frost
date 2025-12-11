@@ -2,7 +2,7 @@ mod lib_test;
 
 use aes_gcm::aead::{Aead, AeadCore};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use k256::ecdsa::{Signature as EcdsaSignature, SigningKey as EcdsaSigningKey};
 use k256::{EncodedPoint, SecretKey as K256SecretKey};
 use rand::rngs::OsRng;
@@ -18,8 +18,9 @@ use wasm_bindgen::prelude::*;
 use frost_secp256k1 as frost;
 
 // Custom EdDSA crate
-use eddsa::{EdDSAPrivateKey, EdDSAPublicKey};
+use eddsa::EdDSAPrivateKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use helper::{encrypt_with_edwards_curve, decrypt_with_edwards_curve};
 // ====================================================================
 // region: Custom Structs
 // ====================================================================
@@ -661,40 +662,17 @@ pub fn ecies_encrypt_eddsa(
         hex::decode(recipient_pubkey_hex).map_err(|e| JsError::new(&e.to_string()))?;
     let message = hex::decode(plaintext_hex).map_err(|e| JsError::new(&e.to_string()))?;
 
-    let mut rng = OsRng;
-    let receiver_pk = EdDSAPublicKey::from_compressed_bytes(&receiver_pk_bytes).unwrap();
+    let (ephemeral_pk_bytes, encrypted_msg) =
+        encrypt_with_edwards_curve(&receiver_pk_bytes, &message)
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
-    // 1. Generate Ephemeral Keypair
-    let ephemeral_pv = EdDSAPrivateKey::random(&mut rng);
-    let ephemeral_pk = ephemeral_pv.public();
-
-    // 2. Perform ECDH: Shared Secret = ephemeral_sk * receiver_pk
-    let shared_point = ephemeral_pv.mul(receiver_pk).unwrap();
-
-    // 3. Derive Symmetric Key
-    let mut hasher = blake3::Hasher::new();
-    let shared_bytes = shared_point.to_compressed_bytes().unwrap();
-    hasher.update(&shared_bytes);
-    let key_hash = hasher.finalize();
-    let key = key_hash.as_bytes();
-
-    // 4. Encrypt with AES-GCM
-    let cipher = Aes256Gcm::new(key.into());
-    let mut nonce_bytes = [0u8; 12];
-    rng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &message,
-                aad: &[],
-            },
-        )
-        .map_err(|_e| JsError::new("encryption failure"))?;
-
-    let ephemeral_pk_bytes = ephemeral_pk.to_compressed_bytes().unwrap();
+    // helper returns (ephemeral_pk_bytes, nonce || ciphertext)
+    // We need to split nonce and ciphertext for the JSON response
+    if encrypted_msg.len() < 12 {
+        return Err(JsError::new("Encrypted message too short"));
+    }
+    let nonce_bytes = &encrypted_msg[0..12];
+    let ciphertext = &encrypted_msg[12..];
 
     let response = serde_json::json!({
         "ephemeral_public_key_hex": hex::encode(ephemeral_pk_bytes),
@@ -751,6 +729,7 @@ pub fn ecies_decrypt_ecdsa(
 }
 
 // Ported from helper/lib.rs: decrypt_with_edwards_curve
+// Ported from helper/lib.rs: decrypt_with_edwards_curve
 #[wasm_bindgen]
 pub fn ecies_decrypt_eddsa(
     recipient_private_key_hex: &str,
@@ -771,32 +750,12 @@ pub fn ecies_decrypt_eddsa(
     let nonce_bytes = hex::decode(nonce_hex).map_err(|e| JsError::new(&e.to_string()))?;
     let ciphertext = hex::decode(ciphertext_hex).map_err(|e| JsError::new(&e.to_string()))?;
 
-    let receiver_prv = EdDSAPrivateKey::from_bytes(sk_bytes);
-    let ephemeral_pk = EdDSAPublicKey::from_compressed_bytes(&ephemeral_pk_bytes).unwrap();
+    // helper expects nonce || ciphertext
+    let mut encrypted_msg = nonce_bytes;
+    encrypted_msg.extend(ciphertext);
 
-    // 2. Perform ECDH
-    let shared_point = receiver_prv.mul(ephemeral_pk).unwrap();
-
-    // 3. Derive Symmetric Key
-    let mut hasher = blake3::Hasher::new();
-    let shared_bytes = shared_point.to_compressed_bytes().unwrap();
-    hasher.update(&shared_bytes);
-    let key_hash = hasher.finalize();
-    let key = key_hash.as_bytes();
-
-    // 4. Decrypt with AES-GCM
-    let cipher = Aes256Gcm::new(key.into());
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let plaintext = cipher
-        .decrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &ciphertext,
-                aad: &[],
-            },
-        )
-        .map_err(|_e| JsError::new("decryption failure"))?;
+    let plaintext = decrypt_with_edwards_curve(&sk_bytes, &ephemeral_pk_bytes, &encrypted_msg)
+        .map_err(|e| JsError::new(&e.to_string()))?;
 
     Ok(hex::encode(plaintext))
 }

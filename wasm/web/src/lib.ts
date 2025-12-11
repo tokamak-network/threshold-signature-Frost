@@ -31,13 +31,17 @@ import type { DkgStatus, LogEntry, Participant, PendingDKGSession, CompletedDKGS
 export const generateRandomKeys = (keyType: 'secp256k1' | 'edwards_on_bls12381') => {
     let keys: { private: string; public: string, key_type?: string } = { private: '', public: '' };
     if (keyType === 'edwards_on_bls12381') {
-        // Use helper to generate edwards_on_bls12381 key
-        keys.key_type = 'edwards_on_bls12381';
+        const eddsaKeys = JSON.parse(generate_eddsa_keypair());
+        keys.key_type = keyType;
+        keys.private = eddsaKeys.private_key_hex;
+        keys.public = eddsaKeys.public_key_hex;
         return keys;
     }
     const ecdsaKeys = JSON.parse(generate_ecdsa_keypair());
-    ecdsaKeys.key_type = 'secp256k1';
-    return ecdsaKeys;
+    keys.key_type = keyType;
+    keys.private = ecdsaKeys.private_key_hex;
+    keys.public = ecdsaKeys.public_key_hex;
+    return keys;
 };
 
 export const deriveKeysFromMetaMask = async (signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>, targetKeyType: 'secp256k1' | 'edwards_on_bls12381', salt: string) => {

@@ -32,6 +32,7 @@ wasm-gen = "0.1.4"
 blake3.workspace = true
 ark-ec.workspace = true
 ark-serialize.workspace = true
+helper = { path = "../helper" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.37"

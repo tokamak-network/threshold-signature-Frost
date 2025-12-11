@@ -319,8 +319,11 @@ fn write_json<P: AsRef<Path>, T: serde::Serialize>(path: P, value: &T) -> Result
 
 /// Parse a message string: if it starts with `0x`, treat as hex; otherwise use ASCII bytes.
 fn parse_message_to_bytes(msg: &str) -> Result<Vec<u8>> {
-    let stripped = msg.strip_prefix("0x").unwrap_or(msg);
-    Ok(hex::decode(stripped)?)
+    if let Some(stripped) = msg.strip_prefix("0x") {
+        Ok(hex::decode(stripped)?)
+    } else {
+        Ok(msg.as_bytes().to_vec())
+    }
 }
 
 /// Populate `vmap` with verifying shares for the `needed_ids` by scanning `dir` for `share_*.json`.
@@ -837,10 +840,7 @@ async fn main() -> Result<()> {
                                         )
                                     })
                                     .collect();
-                                let msg_bytes = {
-                                    let stripped = message.trim_start_matches("0x");
-                                    hex::decode(stripped).context("message must be valid hex")?
-                                };
+                                let msg_bytes = parse_message_to_bytes(&message)?;
                                 let msg_hex = if msg_bytes.len() == 32 {
                                     format!("0x{}", hex::encode(&msg_bytes))
                                 } else {
@@ -853,7 +853,7 @@ async fn main() -> Result<()> {
                                     participants: parts,
                                     participants_pubs: pubs,
                                     group_vk_sec1_hex: group_vk_sec1_hex.clone(),
-                                    message: message.clone(),
+                                    message: format!("0x{}", hex::encode(&msg_bytes)),
                                     message_hex: msg_hex,
                                 });
                             } else {

@@ -111,7 +111,7 @@ round1:
 round2:
 	for f in $$(ls "$(out)"/share_*.json | head -n $(t)); do \
 	  echo "==> Round2 for $$f using r1 dir $(out)"; \
-	  pubs=$$(node -e 'const fs=require("fs"); const dir="users"; if(!fs.existsSync(dir)){process.stdout.write("");process.exit(0);} const files=fs.readdirSync(dir).filter(name=>name.startsWith("user")&&name.endsWith(".json")).sort((a,b)=>parseInt(a.replace(/\D+/g,""))-parseInt(b.replace(/\D+/g,""))); const out=files.map(name=>{ const u=JSON.parse(fs.readFileSync(dir + "/" + name, "utf8")); return u.uid + ";;;" + JSON.stringify(u.roster_public_key); }); process.stdout.write(out.join(","));'); \
+	  pubs=$$(node -e 'const fs=require("fs"); const dir="users"; if(!fs.existsSync(dir)){process.stdout.write("");process.exit(0);} const files=fs.readdirSync(dir).filter(name=>name.startsWith("user")&&name.endsWith(".json")).sort((a,b)=>parseInt(a.replace(/\D+/g,""))-parseInt(b.replace(/\D+/g,""))); const out=files.map(name=>{ const u=JSON.parse(fs.readFileSync(dir + "/" + name, "utf8")); return u.uid + ":" + JSON.stringify(u.roster_public_key); }); process.stdout.write(out.join(","));'); \
 	  if [ -z "$$pubs" ]; then echo "ERROR: could not build participants-pubs from users/. Run 'make dkg' first."; exit 1; fi; \
 	  cargo run -p signing -- --key-type $(KEY_TYPE) --private-key $$(node -e 'const u=JSON.parse(fs.readFileSync("users/user" + $$f.match(/\d+/)[0] + ".json","utf8")); process.stdout.write(u.private_key_hex);') round2 --share "$$f" --round1-dir "$(out)" --message '$(msg)' --participants-pubs "$$pubs"; \
 	done

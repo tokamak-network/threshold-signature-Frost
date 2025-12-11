@@ -93,7 +93,7 @@ impl RosterPublicKey {
             RosterPublicKey::EdwardsOnBls12381(pk_hex) => {
                 let pk_bytes = hex::decode(pk_hex)?;
                 let (eph_pub_bytes, encrypted_msg) =
-                    encrypt_with_edwards_curve(&pk_bytes, plaintext);
+                    encrypt_with_edwards_curve(&pk_bytes, plaintext)?;
                 if encrypted_msg.len() < 12 {
                     return Err(anyhow!("Encrypted message too short from EdDSA encryption"));
                 }
@@ -172,11 +172,11 @@ impl RosterSigningKey {
                 let ciphertext_bytes = hex::decode(&encrypted_payload.ciphertext)?;
                 let mut encrypted_msg = nonce_bytes;
                 encrypted_msg.extend_from_slice(&ciphertext_bytes);
-                Ok(decrypt_with_edwards_curve(
+                decrypt_with_edwards_curve(
                     sk_bytes,
                     &eph_pub_bytes,
                     &encrypted_msg,
-                ))
+                )
             }
             _ => Err(anyhow!("Mismatched key types for decryption")),
         }
@@ -216,23 +216,31 @@ fn derive_sk_scalar(sk_bytes: &[u8]) -> ark_ed_on_bls12_381::Fr {
 
 /// Encrypt `plaintext` for `receiver_pk_bytes` (EdDSA) using ECIES-like scheme.
 /// Returns (ephemeral_pub_bytes, nonce || ciphertext).
-pub fn encrypt_with_edwards_curve(receiver_pk_bytes: &[u8], message: &[u8]) -> (Vec<u8>, Vec<u8>) {
+pub fn encrypt_with_edwards_curve(
+    receiver_pk_bytes: &[u8],
+    message: &[u8],
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let mut rng = rand::thread_rng();
 
     //eddsa::EdDSAPrivateKey::from_bytes(*sk_bytes)
     // Deserialize Receiver's Public Key
-    let receiver_pk = eddsa::EdDSAPublicKey::from_compressed_bytes(receiver_pk_bytes).unwrap();
+    let receiver_pk = eddsa::EdDSAPublicKey::from_compressed_bytes(receiver_pk_bytes)
+        .map_err(|e| anyhow!("invalid receiver pubkey: {e}"))?;
 
     // 1. Generate Ephemeral Keypair
     let ephemeral_pv = eddsa::EdDSAPrivateKey::random(&mut rng);
     let ephemeral_pk = ephemeral_pv.public();
 
     // 2. Perform ECDH: Shared Secret = ephemeral_sk * receiver_pk
-    let shared_point = ephemeral_pv.mul(receiver_pk).unwrap();
+    let shared_point = ephemeral_pv
+        .mul(receiver_pk)
+        .map_err(|e| anyhow!("ECDH failed: {e}"))?;
 
     // 3. Derive Symmetric Key
     let mut hasher = Hasher::new();
-    let shared_bytes = shared_point.to_compressed_bytes().unwrap();
+    let shared_bytes = shared_point
+        .to_compressed_bytes()
+        .map_err(|e| anyhow!("shared point serialization failed: {e}"))?;
     hasher.update(&shared_bytes);
     let key_hash = hasher.finalize();
     let key = key_hash.as_bytes();
@@ -251,15 +259,17 @@ pub fn encrypt_with_edwards_curve(receiver_pk_bytes: &[u8], message: &[u8]) -> (
                 aad: &[],
             },
         )
-        .expect("encryption failure");
+        .map_err(|e| anyhow!("aes-gcm encrypt: {e}"))?;
 
     // Pack nonce with ciphertext
     let mut encrypted_msg = nonce_bytes.to_vec();
     encrypted_msg.extend(ciphertext);
 
-    let ephemeral_pk_bytes = ephemeral_pk.to_compressed_bytes().unwrap();
+    let ephemeral_pk_bytes = ephemeral_pk
+        .to_compressed_bytes()
+        .map_err(|e| anyhow!("ephemeral pubkey serialization failed: {e}"))?;
 
-    (ephemeral_pk_bytes.to_vec(), encrypted_msg)
+    Ok((ephemeral_pk_bytes.to_vec(), encrypted_msg))
 }
 
 /// Decrypt with `sk_bytes` (EdDSA) and `ephemeral_pk_bytes`.
@@ -268,18 +278,23 @@ pub fn decrypt_with_edwards_curve(
     sk_bytes: &[u8; 32],
     ephemeral_pk_bytes: &[u8],
     encrypted_msg: &[u8],
-) -> Vec<u8> {
+) -> anyhow::Result<Vec<u8>> {
     // 1. Derive Receiver's Scalar Key
     let receiver_prv = eddsa::EdDSAPrivateKey::from_bytes(*sk_bytes);
     // Deserialize Ephemeral Public Key
-    let ephemeral_pk = eddsa::EdDSAPublicKey::from_compressed_bytes(ephemeral_pk_bytes).unwrap();
+    let ephemeral_pk = eddsa::EdDSAPublicKey::from_compressed_bytes(ephemeral_pk_bytes)
+        .map_err(|e| anyhow!("invalid ephemeral pubkey: {e}"))?;
 
     // 2. Perform ECDH: Shared Secret = sk_scalar * ephemeral_pk
-    let shared_point = receiver_prv.mul(ephemeral_pk).unwrap();
+    let shared_point = receiver_prv
+        .mul(ephemeral_pk)
+        .map_err(|e| anyhow!("ECDH failed: {e}"))?;
 
     // 3. Derive Symmetric Key
     let mut hasher = Hasher::new();
-    let shared_bytes = shared_point.to_compressed_bytes().unwrap();
+    let shared_bytes = shared_point
+        .to_compressed_bytes()
+        .map_err(|e| anyhow!("shared point serialization failed: {e}"))?;
     hasher.update(&shared_bytes);
     let key_hash = hasher.finalize();
     let key = key_hash.as_bytes();
@@ -289,7 +304,7 @@ pub fn decrypt_with_edwards_curve(
 
     // Extract Nonce and Ciphertext
     if encrypted_msg.len() < 12 {
-        panic!("Encrypted message too short");
+        return Err(anyhow!("Encrypted message too short"));
     }
     let nonce = Nonce::from_slice(&encrypted_msg[0..12]);
     let ciphertext = &encrypted_msg[12..];
@@ -302,7 +317,7 @@ pub fn decrypt_with_edwards_curve(
                 aad: &[],
             },
         )
-        .expect("decryption failure")
+        .map_err(|e| anyhow!("decryption failure: {e}"))
 }
 
 /// Derive a 32-byte AES key from a secp256k1 ECDH secret via SHA-512(prefix || dh).first32

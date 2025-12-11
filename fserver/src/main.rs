@@ -39,8 +39,8 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use helper::{
-    auth_payload_finalize, auth_payload_round1, auth_payload_sign_r1, auth_payload_sign_r2,
-    EncryptedPayload, RosterPublicKey,
+    auth_payload_finalize, auth_payload_round1, auth_payload_round2, auth_payload_sign_r1,
+    auth_payload_sign_r2, EncryptedPayload, RosterPublicKey,
 };
 
 // ========================= CLI =========================
@@ -1111,7 +1111,30 @@ async fn handle_client_text(
                     .ok_or_else(|| anyhow!("no RosterPublicKey for suid"))?;
                 for (rid_hex, encrypted_payload, sig_hex) in pkgs_cipher {
                     let rid: frost::Identifier = bincode::deserialize(&hex::decode(&rid_hex)?)?;
-                    // TODO: Re-enable verification once client sends signature for R2 payload
+
+                    let vk = s
+                        .roster_pubs
+                        .get(&suid)
+                        .ok_or_else(|| anyhow!("no RosterPublicKey for suid"))?;
+
+                    let eph_pub_bytes = match &encrypted_payload.ephemeral_public_key {
+                        RosterPublicKey::Secp256k1(hex_str) => hex::decode(hex_str)?,
+                        RosterPublicKey::EdwardsOnBls12381(hex_str) => hex::decode(hex_str)?,
+                    };
+                    let nonce_bytes = hex::decode(&encrypted_payload.nonce)?;
+                    let ciphertext_bytes = hex::decode(&encrypted_payload.ciphertext)?;
+
+                    let payload = auth_payload_round2(
+                        &session,
+                        &from_id,
+                        &rid,
+                        &eph_pub_bytes,
+                        &nonce_bytes,
+                        &ciphertext_bytes,
+                    );
+                    vk.verify(&payload, &sig_hex)
+                        .context("Round 2 package signature verification failed")?;
+
                     s.r2_inbox
                         .entry(rid)
                         .or_default()
