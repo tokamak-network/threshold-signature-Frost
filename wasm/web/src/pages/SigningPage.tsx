@@ -377,36 +377,46 @@ function SigningPage() {
                 toast.success(`New random ${keyType} key pair generated.`);
             }
 
+            // Decrypt Key Package if loaded
+            let decryptedKeyPackage = keyPackage;
+            if (keyPackage) {
+                // 1. Detect if the package is encrypted
+                let isEncrypted = false;
+                try {
+                    const parsed = JSON.parse(keyPackage);
+                    // Check for EncryptedShare structure
+                    if (parsed.ciphertext_hex && parsed.nonce_hex) {
+                        isEncrypted = true;
+                    }
+                } catch (e) {
+                    // Not a JSON object, so definitely not our encrypted format
+                    isEncrypted = false;
+                }
+
+                if (isEncrypted) {
+                    try {
+                        if (!keys.aes_key_hex) {
+                            throw new Error("Key package is encrypted, but no AES key was derived. Did you use the correct wallet?");
+                        }
+                        log('info', 'Decrypting key package with derived AES key...');
+                        decryptedKeyPackage = decrypt_share(keys.aes_key_hex, keyPackage);
+                        log('success', 'Key package decrypted successfully.');
+                    } catch (decryptErr: any) {
+                        log('error', `Failed to decrypt key package: ${decryptErr.message}`);
+                        toast.error("Your share cannot be decrypted. Wrong key or share?");
+                        return; // Stop execution, do not set keys
+                    }
+                } else {
+                    log('info', 'Key package appears to be plaintext bincode-hex.');
+                }
+            }
+
+            // Only set keys if decryption succeeded (or wasn't needed)
             setPrivateKey(keys.private_key_hex);
             setPublicKey(keys.public_key_hex);
             setAesKey(keys.aes_key_hex || '');
-
-            // Decrypt Key Package if loaded
-            if (keyPackage) {
-                try {
-                    // keyPackage now holds the bincode-hex string (potentially encrypted)
-                    // We need to check if it's encrypted or plaintext
-                    let decryptedKeyPackage = keyPackage;
-                    try {
-                        const parsedKeyPackage = JSON.parse(keyPackage); // Try parsing as EncryptedShare JSON
-                        if (parsedKeyPackage.ciphertext_hex && parsedKeyPackage.nonce_hex) {
-                            if (!keys.aes_key_hex) {
-                                throw new Error("Key package is encrypted, but no AES key was derived. Did you use the correct wallet?");
-                            }
-                            log('info', 'Decrypting key package with derived AES key...');
-                            decryptedKeyPackage = decrypt_share(keys.aes_key_hex, keyPackage);
-                            log('success', 'Key package decrypted successfully.');
-                        }
-                    } catch (e) {
-                        // Not an EncryptedShare JSON, assume it's plaintext bincode-hex
-                        log('info', 'Key package appears to be plaintext bincode-hex.');
-                    }
-                    setKeyPackage(decryptedKeyPackage); // Update with decrypted (or confirmed plaintext) bincode-hex
-
-                } catch (decryptErr: any) {
-                    log('error', `Failed to decrypt key package: ${decryptErr.message}`);
-                    toast.error(`Decryption failed: ${decryptErr.message}`);
-                }
+            if (keyPackage && decryptedKeyPackage !== keyPackage) {
+                setKeyPackage(decryptedKeyPackage);
             }
 
         } catch (e: any) {
@@ -691,7 +701,17 @@ function SigningPage() {
                         <label>Your DKG Secret Key Package</label>
                         <textarea readOnly value={keyPackage} onChange={e => setKeyPackage(e.target.value)} rows={4} placeholder="Upload your secret key package from the DKG ceremony..."></textarea>
                         <input type="file" ref={fileInputRef} onChange={handleKeyFileUpload} accept=".json" style={{ display: 'none' }} />
-                        <button onClick={() => fileInputRef.current?.click()} className="grey-button">Upload Key File</button>
+                        <button onClick={() => {
+                            // Clear derived keys and previous package data when uploading a new key file
+                            setPrivateKey('');
+                            setPublicKey('');
+                            setAesKey('');
+                            setKeyPackage('');
+                            setGroupVk('');
+                            setRoster([]);
+                            setSalt('2026'); // Reset to default
+                            fileInputRef.current?.click();
+                        }} className="grey-button" disabled={isServerConnected}>Upload Key File</button>
                     </div>
                     <hr />
 
