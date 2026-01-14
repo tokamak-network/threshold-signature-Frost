@@ -13,9 +13,9 @@ const keyType = process.argv[4] || 'secp256k1'; // Default to secp256k1
 fs.mkdirSync(outDir, { recursive: true });
 
 let edKeys = [];
-if (keyType === 'ed25519') {
+if (keyType === 'edwards_on_bls12381') {
     try {
-        console.log(`Generating ${n} Ed25519 keys using helper crate...`);
+        console.log(`Generating ${n} edwards_on_bls12381 keys using helper crate...`);
         // Use -q to suppress build output, capture stdout
         const output = execSync(`cargo run -q -p helper --bin gen_ed_keys -- ${n}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
         edKeys = output.trim().split('\n').map(line => line.trim().split(' '));
@@ -23,7 +23,7 @@ if (keyType === 'ed25519') {
             throw new Error(`Expected ${n} keys, got ${edKeys.length}`);
         }
     } catch (e) {
-        console.error("Failed to generate Ed25519 keys via Rust:", e.message);
+        console.error("Failed to generate edwards_on_bls12381 keys via Rust:", e.message);
         process.exit(1);
     }
 }
@@ -42,13 +42,13 @@ for (let i = 1; i <= n; i++) {
             type: 'Secp256k1',
             key: pubKeyHex,
         };
-    } else if (keyType === 'ed25519') {
+    } else if (keyType === 'edwards_on_bls12381') {
         const [genPriv, genPub] = edKeys[i - 1];
         privHex = genPriv;
         pubKeyHex = genPub;
 
         rosterPublicKey = {
-            type: 'Ed25519',
+            type: 'EdwardsOnBls12381',
             key: pubKeyHex,
         };
     } else {

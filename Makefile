@@ -1,7 +1,7 @@
 # ===== tokamak-frost Makefile =====
 # Usage (examples):
 #   make dkg out=run_dkg t=3 n=3 gid=mygroup bind=127.0.0.1:9034 KEY_TYPE=secp256k1
-#   make all out=run_dkg t=2 n=2 gid=mygroup bind=127.0.0.1:9034 KEY_TYPE=ed25519
+#   make all out=run_dkg t=2 n=2 gid=mygroup bind=127.0.0.1:9034 KEY_TYPE=edwards_on_bls12381
 #   make onchain out=run_dkg
 #   make all out=run_dkg t=2 n=5 gid=mygroup bind=127.0.0.1:9043 msg='tokamak message to sign' KEY_TYPE=secp256k1
 
@@ -29,7 +29,7 @@ help:
 	echo "  make dkg out=... t=... n=... gid=... bind=host:port KEY_TYPE=..."
 	echo "  make all out=... t=... n=... gid=... bind=host:port msg=... KEY_TYPE=..."
 	echo ""
-	echo "Variables: out, t (threshold), n (participants), gid (group id), bind (host:port), msg, KEY_TYPE (secp256k1 or ed25519)"
+	echo "Variables: out, t (threshold), n (participants), gid (group id), bind (host:port), msg, KEY_TYPE (secp256k1 or edwards_on_bls12381)"
 
 # ----- DKG end-to-end (server + clients, write group.json/share_*.json) -----
 dkg: build
@@ -130,7 +130,7 @@ offchain:
 
 # ----- Onchain verify (Hardhat) -----
 onchain:
-	cd onchain-verify && SIG="../$(out)/signature.json" npx hardhat run scripts/verify-signature.ts --network hardhat
+	cd packages/ts/onchain-verify && SIG="../../../$(out)/signature.json" npx hardhat run scripts/verify-signature.ts --network hardhat
 
 close:
 	curl -s "http://$(bind)/close" || true

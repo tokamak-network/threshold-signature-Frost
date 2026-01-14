@@ -1,13 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "helper",
-    "keygen/trusted",
-    "keygen/dkg",
-    "fserver",
-    "signing",
-    "offchain-verify",
-    "wasm",
+    "packages/rust/helper",
+    "packages/rust/dkg",
+    "packages/rust/fserver",
+    "packages/rust/signing",
+    "packages/rust/offchain-verify",
+    "packages/rust/wasm",
 ]
 
 [workspace.package]

@@ -1,0 +1,15 @@
+{
+    "name": "tokamak-frost-wasm",
+    "version": "1.0.0",
+    "type": "module",
+    "main": "./index.node.js",
+    "browser": "./index.js",
+    "types": "./index.d.ts",
+    "exports": {
+        ".": {
+            "browser": "./index.js",
+            "node": "./index.node.js",
+            "default": "./index.js"
+        }
+    }
+}
